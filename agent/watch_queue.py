@@ -20,14 +20,25 @@ again, since claim_ticket.py itself only ever claims one ticket per run.
 Respects AGENT_ENABLED / AGENT_DRY_RUN like every other step. With
 AGENT_DRY_RUN=true this is safe to leave running to watch what it WOULD do.
 
+NEW: on ANY step failure (non-zero exit) or an unhandled poll-level error,
+calls notify.notify_failure(...) - this shows a Windows toast, appends a
+structured record to logs/notifications.jsonl, and (if you've completed the
+optional email setup in notify.py) emails you with exactly which step
+failed and what to check next. See notify.py for setup.
+
 .env additions needed:
     WATCH_POLL_INTERVAL_SECONDS=300
+    NOTIFY_ENABLED=true
+    NOTIFY_TOAST_ENABLED=true
+    NOTIFY_EMAIL_ENABLED=false   (true once optional email setup is done)
+    NOTIFY_EMAIL_TO=you@yourcompany.com
 """
 import os
 import sys
 import time
 import subprocess
 import jira_client as jc
+import notify
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 POLL_INTERVAL = int(os.getenv("WATCH_POLL_INTERVAL_SECONDS", "300"))
@@ -78,6 +89,8 @@ def process_ticket(key):
         if not ok:
             print(f"[{key}] Stopped at {script} (failed, auto-blocked, or you rejected it).")
             jc.audit("watch_queue", key, f"stopped at {script}", "failed")
+            notify.notify_failure(step=script, ticket=key,
+                                   reason=f"{script} exited non-zero")
             return False
     print(f"[{key}] Completed through Jira update. Draft PR awaiting human review/merge.")
     jc.audit("watch_queue", key, "completed full pipeline", "ok")
@@ -100,6 +113,7 @@ def poll_loop():
         except Exception as e:
             print(f"Error during poll cycle: {e}")
             jc.audit("watch_queue", "-", str(e), "failed")
+            notify.notify_failure(step="poll_loop", ticket="-", reason=str(e))
         time.sleep(POLL_INTERVAL)
 
 
