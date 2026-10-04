@@ -75,7 +75,7 @@ private class EventRegistrationControllerTest {
         Boolean threw = false;
         try {
             EventRegistrationController.submitRegistration(
-                'John Smith', 'john@example.com', null, 11, Date.today().addDays(5)
+                'John Smith', 'john@example.com', null, 500, Date.today().addDays(5)
             );
         } catch (AuraHandledException e) {
             threw = true;
