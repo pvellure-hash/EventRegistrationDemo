@@ -30,6 +30,19 @@ import subprocess
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))
+
+# Load .env explicitly here, rather than relying on being imported after
+# jira_client.py (which also loads it as a side effect). This is what
+# makes `python preflight.py` work correctly when run standalone, not
+# just when imported by watch_queue.py. Without this, every os.getenv()
+# below silently falls back to its default (usually empty/false), which
+# looks exactly like misconfiguration even when .env is actually correct.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(REPO_ROOT, ".env"))
+except ImportError:
+    pass  # python-dotenv not installed; fall back to whatever is already in the environment
+
 BASE_BRANCH = os.getenv("GITHUB_BASE_BRANCH", "main").strip()
 
 
