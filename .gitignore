@@ -1,0 +1,23 @@
+# Salesforce / SFDX
+.sfdx/
+.localdevserver/
+deploy-options.json
+
+# Python agent environment
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets - NEVER commit
+.env
+
+# Generated agent artifacts
+logs/
+docs/ai-reports/*-prompt.md
+docs/ai-reports/*-pr.md
+docs/ai-reports/*-jira.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*.log

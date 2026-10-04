@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Event Registration User</label>
+    <description>Grants access to create and view Event Registration records via the registration form.</description>
+    <hasActivationRequired>false</hasActivationRequired>
+
+    <objectPermissions>
+        <object>Event_Registration__c</object>
+        <allowCreate>true</allowCreate>
+        <allowRead>true</allowRead>
+        <allowEdit>true</allowEdit>
+        <allowDelete>false</allowDelete>
+        <viewAllRecords>false</viewAllRecords>
+        <modifyAllRecords>false</modifyAllRecords>
+    </objectPermissions>
+
+    <!-- Attendee_Name__c, Email__c, Number_of_Guests__c, Event_Date__c, and
+         Status__c are all marked required=true at the field definition
+         level. Salesforce automatically grants read/edit access to
+         universally-required fields for anyone with object access, and
+         will REJECT a permission set deploy that tries to set explicit
+         fieldPermissions on them ("You cannot deploy to a required
+         field"). Only Phone__c (not required) needs an explicit entry. -->
+    <fieldPermissions>
+        <field>Event_Registration__c.Phone__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+
+    <tabSettings>
+        <tab>Event_Registration__c</tab>
+        <visibility>Visible</visibility>
+    </tabSettings>
+
+    <classAccesses>
+        <apexClass>EventRegistrationController</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+</PermissionSet>

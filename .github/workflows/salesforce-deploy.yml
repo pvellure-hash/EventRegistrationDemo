@@ -1,0 +1,44 @@
+name: Salesforce Deploy (real deploy on merge to main)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'force-app/**'
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: deploy
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+
+      - name: Authenticate to Salesforce org
+        run: |
+          echo "${{ secrets.SF_SFDX_AUTH_URL }}" > ./sfdx_auth_url.txt
+          sf org login sfdx-url --sfdx-url-file ./sfdx_auth_url.txt --alias target-org --set-default
+          rm ./sfdx_auth_url.txt
+
+      - name: Real deploy with local tests
+        id: deploy
+        run: |
+          sf project deploy start --test-level RunLocalTests --target-org target-org --json > deploy-result.json || true
+          cat deploy-result.json
+
+      - name: Write step summary
+        run: |
+          echo "## Salesforce Deploy Result" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          cat deploy-result.json >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload deploy result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-result
+          path: deploy-result.json

@@ -1,0 +1,25 @@
+name: Salesforce Validate (PR check-only deploy)
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    name: validate
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+
+      - name: Authenticate to Salesforce org
+        run: |
+          echo "${{ secrets.SF_SFDX_AUTH_URL }}" > ./sfdx_auth_url.txt
+          sf org login sfdx-url --sfdx-url-file ./sfdx_auth_url.txt --alias target-org --set-default
+          rm ./sfdx_auth_url.txt
+
+      - name: Dry-run deploy with local tests
+        run: sf project deploy start --dry-run --test-level RunLocalTests --target-org target-org

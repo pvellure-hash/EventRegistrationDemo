@@ -1,0 +1,101 @@
+<template>
+    <lightning-card title="Event Registration" icon-name="standard:event">
+        <div class="slds-p-horizontal_medium slds-p-bottom_medium">
+
+            <template if:true={showSuccess}>
+                <div class="slds-notify slds-notify_alert slds-theme_success" role="alert">
+                    <span class="slds-assistive-text">Success</span>
+                    Registration submitted successfully! Confirmation number: {lastRegistrationId}
+                </div>
+            </template>
+
+            <template if:true={errorMessage}>
+                <div class="slds-notify slds-notify_alert slds-theme_error" role="alert">
+                    <span class="slds-assistive-text">Error</span>
+                    {errorMessage}
+                </div>
+            </template>
+
+            <lightning-input
+                label="Attendee Name"
+                value={attendeeName}
+                onchange={handleNameChange}
+                required>
+            </lightning-input>
+
+            <lightning-input
+                type="email"
+                label="Email"
+                value={email}
+                onchange={handleEmailChange}
+                required>
+            </lightning-input>
+
+            <lightning-input
+                type="tel"
+                label="Phone (optional)"
+                value={phone}
+                onchange={handlePhoneChange}>
+            </lightning-input>
+
+            <lightning-input
+                type="number"
+                label="Number of Guests (1-10)"
+                value={numberOfGuests}
+                onchange={handleGuestsChange}
+                min="1"
+                max="10"
+                required>
+            </lightning-input>
+
+            <lightning-input
+                type="date"
+                label="Event Date"
+                value={eventDate}
+                onchange={handleDateChange}
+                required>
+            </lightning-input>
+
+            <div class="slds-p-top_medium">
+                <lightning-button
+                    variant="brand"
+                    label="Submit Registration"
+                    onclick={handleSubmit}
+                    disabled={isSubmitting}>
+                </lightning-button>
+            </div>
+        </div>
+    </lightning-card>
+
+    <lightning-card title="Recent Registrations" icon-name="standard:event" class="slds-m-top_medium">
+        <div class="slds-p-horizontal_medium slds-p-bottom_medium">
+            <template if:true={registrations.data}>
+                <table class="slds-table slds-table_cell-buffer slds-table_bordered">
+                    <thead>
+                        <tr class="slds-line-height_reset">
+                            <th scope="col">Confirmation #</th>
+                            <th scope="col">Name</th>
+                            <th scope="col">Guests</th>
+                            <th scope="col">Event Date</th>
+                            <th scope="col">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template for:each={registrations.data} for:item="reg">
+                            <tr key={reg.Id}>
+                                <td>{reg.Name}</td>
+                                <td>{reg.Attendee_Name__c}</td>
+                                <td>{reg.Number_of_Guests__c}</td>
+                                <td>{reg.Event_Date__c}</td>
+                                <td>{reg.Status__c}</td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </template>
+            <template if:false={registrations.data}>
+                <p class="slds-text-color_weak">No registrations yet.</p>
+            </template>
+        </div>
+    </lightning-card>
+</template>
