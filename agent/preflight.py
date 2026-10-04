@@ -25,18 +25,19 @@ Run standalone for a human-readable report:
     python preflight.py
 """
 import os
+import sys
 import json
+import platform
 import subprocess
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))
+IS_WINDOWS = platform.system() == "Windows"
 
 # Load .env explicitly here, rather than relying on being imported after
 # jira_client.py (which also loads it as a side effect). This is what
 # makes `python preflight.py` work correctly when run standalone, not
-# just when imported by watch_queue.py. Without this, every os.getenv()
-# below silently falls back to its default (usually empty/false), which
-# looks exactly like misconfiguration even when .env is actually correct.
+# just when imported by watch_queue.py.
 try:
     from dotenv import load_dotenv
     load_dotenv(os.path.join(REPO_ROOT, ".env"))
@@ -47,6 +48,9 @@ BASE_BRANCH = os.getenv("GITHUB_BASE_BRANCH", "main").strip()
 
 
 def _run(cmd, cwd=REPO_ROOT, timeout=30):
+    """Runs a command that is a real .exe on PATH (git, python itself).
+    Do NOT use this for npm-installed CLIs like `copilot` or `sf` on
+    Windows — see _run_cli below for why."""
     try:
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout)
@@ -55,6 +59,21 @@ def _run(cmd, cwd=REPO_ROOT, timeout=30):
         return -1, "", "timed out after %ss" % timeout
     except FileNotFoundError as e:
         return -1, "", str(e)
+
+
+def _run_cli(cmd, cwd=REPO_ROOT, timeout=30):
+    """Runs an external CLI tool that may be an npm-installed wrapper
+    (copilot, sf). On Windows, npm installs these as .cmd shim scripts,
+    not .exe files. Python's subprocess.run() cannot launch a .cmd file
+    directly without shell interpretation — it fails with exactly
+    "[WinError 2] The system cannot find the file specified", even though
+    the same command works fine when typed into PowerShell yourself
+    (PowerShell resolves .cmd shims automatically; Python's subprocess
+    does not, unless routed through cmd.exe). Routing through
+    `cmd /c` on Windows fixes this without affecting macOS/Linux, where
+    these tools are plain executables and need no special handling."""
+    full_cmd = ["cmd", "/c"] + cmd if IS_WINDOWS else cmd
+    return _run(full_cmd, cwd=cwd, timeout=timeout)
 
 
 # ---------------------------------------------------------------- Group A
@@ -117,29 +136,35 @@ def check_copilot_cli():
                          "COPILOT_CLI_ENABLED=false — headless step disabled, skipping CLI checks"))
         return results
 
-    code, out, err = _run(["copilot", "-p", "say hello", "-s", "--no-ask-user"], timeout=45)
+    code, out, err = _run_cli(["copilot", "-p", "say hello", "-s", "--no-ask-user"], timeout=45)
     logged_in = (code == 0 and "Authentication failed" not in (out + err))
     results.append(("B1 Copilot CLI logged in", logged_in,
                      "responded OK" if logged_in else
-                     "run: copilot login --device-code (%s)" % err.strip()[:300]))
+                     "run: copilot login --device-code (%s)" % (err.strip()[:300] or out.strip()[:300])))
 
-    code, out, err = _run(["copilot", "-p", "run: git status --short --branch", "-s", "--no-ask-user"], timeout=45)
+    code, out, err = _run_cli(["copilot", "-p", "run: git status --short --branch", "-s", "--no-ask-user"], timeout=45)
     denied = "Permission denied" in (out + err)
     trusted = (code == 0 and not denied)
     results.append(("B2 folder trusted for shell/write", trusted,
                      "verified headless" if trusted else
-                     "Permission denied — this folder's approvals are missing/incomplete in "
-                     "%USERPROFILE%\\.copilot\\permissions-config.json (see Appendix D / Issue C1-C2)"))
+                     ("Permission denied — this folder's approvals are missing/incomplete in "
+                      "%USERPROFILE%\\.copilot\\permissions-config.json (see Appendix D / Issue C1-C2)"
+                      if denied else (err.strip()[:300] or out.strip()[:300]))))
     return results
 
 
 # ---------------------------------------------------------------- Group C
 def check_credentials():
     results = []
-    code, out, _ = _run(["python", os.path.join(AGENT_DIR, "check_connections.py")], timeout=30)
+    # Use sys.executable, NOT the literal string "python" — this guarantees
+    # we re-run check_connections.py with the exact same interpreter (and
+    # therefore the same virtual environment / installed packages) that is
+    # currently running preflight.py, rather than whatever "python" happens
+    # to resolve to on PATH, which can silently be a different install.
+    code, out, err = _run([sys.executable, os.path.join(AGENT_DIR, "check_connections.py")], timeout=30)
     all_ok = (code == 0) and ("FAIL" not in out)
-    results.append(("C1 Jira + GitHub reachable", all_ok,
-                     "all OK" if all_ok else out.strip()[:400]))
+    detail = "all OK" if all_ok else (out.strip()[:400] or err.strip()[:400] or "no output — process may have failed to start")
+    results.append(("C1 Jira + GitHub reachable", all_ok, detail))
 
     github_repo_env = os.getenv("GITHUB_REPO", "").strip()
     _, remote_out, _ = _run(["git", "remote", "get-url", "origin"])
@@ -166,7 +191,7 @@ def check_salesforce():
     if not sf_org:
         results.append(("D1 org authenticated", False, "SF_TARGET_ORG not set in .env"))
         return results
-    code, out, err = _run(["sf", "org", "display", "--target-org", sf_org, "--json"], timeout=30)
+    code, out, err = _run_cli(["sf", "org", "display", "--target-org", sf_org, "--json"], timeout=30)
     ok, detail = False, (err.strip()[:300] or out.strip()[:300])
     if code == 0:
         try:
@@ -175,7 +200,7 @@ def check_salesforce():
             if ok:
                 detail = "connected (%s)" % data.get("result", {}).get("username", sf_org)
         except Exception:
-            detail = "could not parse sf output"
+            detail = "could not parse sf output: %s" % out.strip()[:200]
     results.append(("D1 org '%s' authenticated" % sf_org, ok, detail))
     return results
 
