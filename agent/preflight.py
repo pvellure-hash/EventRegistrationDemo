@@ -61,7 +61,7 @@ def _run(cmd, cwd=REPO_ROOT, timeout=30):
         return -1, "", str(e)
 
 
-def _run_cli(cmd, cwd=REPO_ROOT, timeout=30):
+def _run_cli(cmd, cwd=REPO_ROOT, timeout=30, strip_github_token=False):
     """Runs an external CLI tool that may be an npm-installed wrapper
     (copilot, sf). On Windows, npm installs these as .cmd shim scripts,
     not .exe files. Python's subprocess.run() cannot launch a .cmd file
@@ -71,9 +71,32 @@ def _run_cli(cmd, cwd=REPO_ROOT, timeout=30):
     (PowerShell resolves .cmd shims automatically; Python's subprocess
     does not, unless routed through cmd.exe). Routing through
     `cmd /c` on Windows fixes this without affecting macOS/Linux, where
-    these tools are plain executables and need no special handling."""
+    these tools are plain executables and need no special handling.
+
+    strip_github_token=True (used for the copilot checks) removes
+    GITHUB_TOKEN/GH_TOKEN/COPILOT_GITHUB_TOKEN from the subprocess's
+    environment before launching. .env's GITHUB_TOKEN is a fine-grained
+    PAT meant only for this project's own GitHub REST API calls (it has
+    no "Copilot Requests" permission) — if it leaks into the copilot
+    subprocess's environment, Copilot tries to authenticate with it
+    instead of its own stored `copilot login` session and fails with
+    "Authentication failed... Your GitHub token may be invalid" (see
+    Issue C3). invoke_copilot.py already does this; preflight.py's own
+    sanity-check calls to copilot need the same treatment."""
     full_cmd = ["cmd", "/c"] + cmd if IS_WINDOWS else cmd
-    return _run(full_cmd, cwd=cwd, timeout=timeout)
+    env = None
+    if strip_github_token:
+        env = os.environ.copy()
+        for var in ("GITHUB_TOKEN", "GH_TOKEN", "COPILOT_GITHUB_TOKEN"):
+            env.pop(var, None)
+    try:
+        r = subprocess.run(full_cmd, cwd=cwd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout, env=env)
+        return r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", "timed out after %ss" % timeout
+    except FileNotFoundError as e:
+        return -1, "", str(e)
 
 
 # ---------------------------------------------------------------- Group A
@@ -136,13 +159,15 @@ def check_copilot_cli():
                          "COPILOT_CLI_ENABLED=false — headless step disabled, skipping CLI checks"))
         return results
 
-    code, out, err = _run_cli(["copilot", "-p", "say hello", "-s", "--no-ask-user"], timeout=45)
+    code, out, err = _run_cli(["copilot", "-p", "say hello", "-s", "--no-ask-user"],
+                               timeout=45, strip_github_token=True)
     logged_in = (code == 0 and "Authentication failed" not in (out + err))
     results.append(("B1 Copilot CLI logged in", logged_in,
                      "responded OK" if logged_in else
                      "run: copilot login --device-code (%s)" % (err.strip()[:300] or out.strip()[:300])))
 
-    code, out, err = _run_cli(["copilot", "-p", "run: git status --short --branch", "-s", "--no-ask-user"], timeout=45)
+    code, out, err = _run_cli(["copilot", "-p", "run: git status --short --branch", "-s", "--no-ask-user"],
+                               timeout=45, strip_github_token=True)
     denied = "Permission denied" in (out + err)
     trusted = (code == 0 and not denied)
     results.append(("B2 folder trusted for shell/write", trusted,
@@ -191,7 +216,7 @@ def check_salesforce():
     if not sf_org:
         results.append(("D1 org authenticated", False, "SF_TARGET_ORG not set in .env"))
         return results
-    code, out, err = _run_cli(["sf", "org", "display", "--target-org", sf_org, "--json"], timeout=30)
+    code, out, err = _run_cli(["sf", "org", "display", "--target-org", sf_org, "--json"], timeout=60)
     ok, detail = False, (err.strip()[:300] or out.strip()[:300])
     if code == 0:
         try:
