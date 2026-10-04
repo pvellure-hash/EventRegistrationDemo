@@ -64,7 +64,7 @@ public with sharing class EventRegistrationController {
             errors.add('Attendee name is required.');
         }
 
-        if (String.isBlank(email) || !isValidEmail(email)) {
+        if (String.isBlank(email)) {
             errors.add('A valid email address is required.');
         }
 
