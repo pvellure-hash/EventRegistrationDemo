@@ -1,37 +1,37 @@
-"""Step 0: Long-running watcher. Polls Jira every WATCH_POLL_INTERVAL_SECONDS
-and, whenever claim_ticket.py's own triage logic claims a ticket, runs the
-rest of the pipeline automatically for it:
+"""Step 0: Long-running watcher. NEW: runs automated pre-flight checks
+(preflight.py) once at startup as a hard gate, and a lightweight re-sync
+check before every ticket, so the agent never starts fixing code against a
+stale or diverged local repo.
 
-    claim_ticket -> prepare_fix -> invoke_copilot (headless CLI fix)
-        -> review_gate (BLOCKS here for your y/n)
+Startup sequence:
+    preflight.run_all() — Repository state (incl. fast-forward sync to the
+    latest origin/main), Copilot CLI, credentials, Salesforce. If ANY check
+    fails, the watcher notifies and REFUSES to start polling at all.
+
+Per-ticket sequence (after claim_ticket.py claims one):
+    preflight.check_git_state() — a lighter re-check (clean tree, correct
+    branch, fast-forward-sync to latest origin/main) run immediately before
+    prepare_fix.py cuts a new branch. This matters because the watcher may
+    run for hours; someone could merge a PR in the meantime. If this fails,
+    only THIS ticket is skipped (with a notification) - not the whole
+    watcher - since the next ticket may well be fine.
+
+    claim_ticket -> [re-sync check] -> prepare_fix -> invoke_copilot
+        (headless CLI fix) -> review_gate (BLOCKS for y/n)
         -> validate_fix -> create_pr -> update_jira
 
-Start once and leave running:  python watch_queue.py
-Stop any time with Ctrl+C - it finishes the step currently running, then
-exits (no state is lost; a ticket stuck mid-pipeline just gets picked back
-up where validate/create_pr/update_jira's existing idempotency already
-handles reruns, exactly as it does today when you run steps by hand).
+Sequential, one ticket at a time, start to finish - no overlap by design
+(blocking subprocess calls). Respects AGENT_ENABLED / AGENT_DRY_RUN.
 
-Each step is invoked as its own subprocess, same as create_pr.py already
-does for validate_fix.py - no step's internal logic is duplicated here.
-Processes ONE ticket fully (success, rejection, or failure) before polling
-again, since claim_ticket.py itself only ever claims one ticket per run.
-
-Respects AGENT_ENABLED / AGENT_DRY_RUN like every other step. With
-AGENT_DRY_RUN=true this is safe to leave running to watch what it WOULD do.
-
-NEW: on ANY step failure (non-zero exit) or an unhandled poll-level error,
-calls notify.notify_failure(...) - this shows a Windows toast, appends a
-structured record to logs/notifications.jsonl, and (if you've completed the
-optional email setup in notify.py) emails you with exactly which step
-failed and what to check next. See notify.py for setup.
+Notifications: any step failure, a failed pre-flight start, or a
+skipped-ticket re-sync failure calls notify.notify_failure(...), which
+shows a Windows toast, logs to logs/notifications.jsonl, and (if enabled)
+emails everyone in agent/recipients.json subscribed to that category.
 
 .env additions needed:
     WATCH_POLL_INTERVAL_SECONDS=300
-    NOTIFY_ENABLED=true
-    NOTIFY_TOAST_ENABLED=true
-    NOTIFY_EMAIL_ENABLED=false   (true once optional email setup is done)
-    NOTIFY_EMAIL_TO=you@yourcompany.com
+    NOTIFY_ENABLED=true / NOTIFY_TOAST_ENABLED=true / NOTIFY_EMAIL_ENABLED=...
+See preflight.py and notify.py for full detail.
 """
 import os
 import sys
@@ -39,13 +39,11 @@ import time
 import subprocess
 import jira_client as jc
 import notify
+import preflight
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 POLL_INTERVAL = int(os.getenv("WATCH_POLL_INTERVAL_SECONDS", "300"))
 
-# Steps run, in order, after claim_ticket.py has already claimed a ticket.
-# review_gate.py is interactive (blocks on input()) - it is NOT given
-# capture_output=True so your terminal's stdin/stdout pass straight through.
 PIPELINE_STEPS = [
     "prepare_fix.py",
     "invoke_copilot.py",
@@ -64,9 +62,6 @@ def run_step(script, key):
 
 
 def claim_next():
-    """Runs claim_ticket.py exactly as you would by hand. It already does
-    the full triage loop (needs-info / blocked / claim-one) itself; we just
-    parse its final 'Claimed: <KEY or none>' line to know what to do next."""
     r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, "claim_ticket.py")],
                        cwd=AGENT_DIR, capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
@@ -80,17 +75,38 @@ def claim_next():
     return None
 
 
+def resync_before_ticket(key):
+    """Lightweight re-check, immediately before cutting a fix branch: is the
+    local repo clean, on the base branch, and fast-forwarded to the exact
+    latest origin/main? If not, skip this ticket (not the whole watcher)
+    and notify - the next poll cycle will retry it."""
+    print(f"\n--- Re-sync check before {key} ---")
+    results = preflight.check_git_state()
+    ok = all(passed for _, passed, _ in results)
+    for name, passed, detail in results:
+        print(f"  {'PASS' if passed else 'FAIL'}  {name}  {'' if passed else detail}")
+    if not ok:
+        reason = preflight.failure_summary(results)
+        print(f"[{key}] Skipping this cycle - repo not in a safe state to branch from.")
+        jc.audit("watch_queue", key, f"skipped - resync check failed: {reason}", "failed")
+        notify.notify_failure(step="preflight", ticket=key, reason=reason)
+    return ok
+
+
 def process_ticket(key):
     print("\n" + "#" * 60)
     print(f"# Processing {key}")
     print("#" * 60)
+
+    if not resync_before_ticket(key):
+        return False
+
     for script in PIPELINE_STEPS:
         ok = run_step(script, key)
         if not ok:
             print(f"[{key}] Stopped at {script} (failed, auto-blocked, or you rejected it).")
             jc.audit("watch_queue", key, f"stopped at {script}", "failed")
-            notify.notify_failure(step=script, ticket=key,
-                                   reason=f"{script} exited non-zero")
+            notify.notify_failure(step=script, ticket=key, reason=f"{script} exited non-zero")
             return False
     print(f"[{key}] Completed through Jira update. Draft PR awaiting human review/merge.")
     jc.audit("watch_queue", key, "completed full pipeline", "ok")
@@ -100,7 +116,16 @@ def process_ticket(key):
 def poll_loop():
     if not jc.ENABLED:
         sys.exit("Agent disabled (AGENT_ENABLED is not 'true'). Stopping.")
-    print(f"Watching project {jc.PROJECT} for ai-ready tickets every "
+
+    print("Running pre-flight checks before starting the watcher...\n")
+    ok, results = preflight.run_all(verbose=True)
+    if not ok:
+        reason = preflight.failure_summary(results)
+        jc.audit("watch_queue", "-", f"pre-flight failed at startup: {reason}", "failed")
+        notify.notify_failure(step="preflight", ticket="-", reason=reason)
+        sys.exit("\nPre-flight checks failed. Fix the items above, then restart watch_queue.py.")
+
+    print(f"\nWatching project {jc.PROJECT} for ai-ready tickets every "
           f"{POLL_INTERVAL}s (Ctrl+C to stop)...")
     while True:
         try:

@@ -1,0 +1,15 @@
+{
+  "_comment": "Edit this file to add or remove people who get notified - no code changes needed.",
+  "_notify_on_options": {
+    "preflight": "alerted when the pre-flight checks block the watcher from starting",
+    "failure": "alerted when a ticket's pipeline run fails partway through",
+    "all": "both of the above"
+  },
+  "recipients": [
+    {
+      "name": "Pavan Vellure",
+      "email": "pvellure@deloitte.ca",
+      "notify_on": ["all"]
+    }
+  ]
+}
