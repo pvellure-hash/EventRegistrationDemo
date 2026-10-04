@@ -35,7 +35,10 @@ export default class EventRegistrationForm extends LightningElement {
     }
 
     handleGuestsChange(event) {
-        this.numberOfGuests = parseInt(event.target.value, 10);
+        const rawValue = event.target.value;
+        this.numberOfGuests = rawValue === '' || rawValue === null || rawValue === undefined
+            ? undefined
+            : parseInt(rawValue, 10);
     }
 
     handleDateChange(event) {
