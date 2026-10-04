@@ -1,6 +1,6 @@
 h3. 🤖 AI-Assisted Fix — Ready for Review
 
-*Status:* Draft PR created — awaiting human review
+*Status:* Draft PR pending — awaiting human review
 *Branch:* fix/CLAUDE-14-guest-count-validation-allows-more-than
 *Pull Request:* <PR link>
 
