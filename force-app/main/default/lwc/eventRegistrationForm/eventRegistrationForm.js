@@ -48,6 +48,13 @@ export default class EventRegistrationForm extends LightningElement {
     async handleSubmit() {
         this.showSuccess = false;
         this.errorMessage = '';
+
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (this.email && !emailPattern.test(this.email.trim())) {
+            this.errorMessage = 'A valid email address is required.';
+            return;
+        }
+
         this.isSubmitting = true;
 
         try {
