@@ -47,28 +47,41 @@ private class EventRegistrationControllerTest {
 
     @isTest
     static void testZeroGuestsIsRejected() {
-        Boolean threw = false;
+        String errorMessage;
         try {
             EventRegistrationController.submitRegistration(
                 'John Smith', 'john@example.com', null, 0, Date.today().addDays(5)
             );
         } catch (AuraHandledException e) {
-            threw = true;
+            errorMessage = e.getMessage();
         }
-        System.assert(threw, 'Zero guests should be rejected (minimum is 1).');
+        System.assertEquals('Number of guests must be between 1 and 10.', errorMessage,
+            'CLAUDE-16: Zero guests should be rejected with the guest-count validation message.');
     }
 
     @isTest
     static void testNegativeGuestsIsRejected() {
-        Boolean threw = false;
+        String errorMessage;
         try {
             EventRegistrationController.submitRegistration(
                 'John Smith', 'john@example.com', null, -3, Date.today().addDays(5)
             );
         } catch (AuraHandledException e) {
-            threw = true;
+            errorMessage = e.getMessage();
         }
-        System.assert(threw, 'Negative guests should be rejected.');
+        System.assertEquals('Number of guests must be between 1 and 10.', errorMessage,
+            'CLAUDE-16: Negative guests should be rejected with the guest-count validation message.');
+    }
+
+    @isTest
+    static void testMinimumBoundaryGuestsIsAccepted() {
+        Test.startTest();
+        Id newId = EventRegistrationController.submitRegistration(
+            'Boundary Tester', 'minimum@example.com', null, 1, Date.today().addDays(5)
+        );
+        Test.stopTest();
+
+        System.assertNotEquals(null, newId, 'CLAUDE-16: Exactly 1 guest (the minimum boundary) should be accepted.');
     }
 
     @isTest

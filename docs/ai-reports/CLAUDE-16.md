@@ -53,7 +53,7 @@ The registration controller accepted zero and negative guest counts because serv
 | File | Change Summary | Lines +/- |
 |---|---|---|
 | `force-app/main/default/classes/EventRegistrationController.cls` | Reject guest counts below `MIN_GUESTS` as well as null and above-maximum values. | +1 / -1 |
-| `force-app/main/default/classes/EventRegistrationControllerTest.cls` | Assert the exact message for zero and negative values; cover acceptance at the minimum boundary of 1. | +20 / -7 |
+| `force-app/main/default/classes/EventRegistrationControllerTest.cls` | Assert the exact message for zero and negative values; cover acceptance at the minimum boundary of 1. | +19 / -6 |
 | `docs/ai-reports/CLAUDE-16.md` | Add the solution report. | New file |
 | `docs/ai-reports/CLAUDE-16-pr.md` | Add the draft PR description. | New file |
 | `docs/ai-reports/CLAUDE-16-jira.md` | Add the Jira comment draft with the PR link placeholder. | New file |
