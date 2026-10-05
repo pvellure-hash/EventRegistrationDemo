@@ -29,6 +29,7 @@ import sys
 import json
 import platform
 import subprocess
+import tool_allowlist
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))

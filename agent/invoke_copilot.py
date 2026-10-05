@@ -42,6 +42,8 @@ import events
 import guards
 import redact
 import security_checks
+import tool_allowlist
+import routing
 
 try:
     import notify
@@ -53,7 +55,7 @@ REPORT_DIR = os.path.join(REPO_ROOT, "docs", "ai-reports")
 KEY_PATTERN = re.compile(rf"^{re.escape(jc.PROJECT)}-\d+$")
 
 CLI_ENABLED = os.getenv("COPILOT_CLI_ENABLED", "false").strip().lower() == "true"
-CLI_MODEL = os.getenv("COPILOT_CLI_MODEL", "").strip()
+CLI_MODEL = os.getenv("AGENT_MODEL_NAME", "").strip() or os.getenv("COPILOT_CLI_MODEL", "").strip()
 CLI_TIMEOUT_MIN = int(os.getenv("COPILOT_CLI_TIMEOUT_MINUTES", "15"))
 
 ALLOW_TOOLS = "read,write,shell(git:*),shell(sf:*)"
@@ -136,6 +138,11 @@ def main():
     if not KEY_PATTERN.match(key):
         sys.exit(f"STOP: '{key}' is not a valid {jc.PROJECT} ticket key.")
     events.current_run_id(key)
+    global CLI_MODEL
+    routed = routing.read_routing(key)
+    if routed and routed.get("model"):
+        CLI_MODEL = routed["model"]
+        print(f"  model  : {CLI_MODEL} ({routed['tier']} tier, routed by prepare_fix.py)")
 
     print("=" * 60)
     print(f"AGENT INVOKE COPILOT CLI | {key} | Dry run: {jc.DRY_RUN}")
@@ -179,6 +186,10 @@ def main():
         print(f"  org    : {why}")
         if not ok:
             stop(key, "prod_org_guard", "blocked", why)
+        ok, why = tool_allowlist.check()
+        print(f"  mcp    : {why}")
+        if not ok:
+            stop(key, "mcp_allowlist", "blocked", why)
 
         with open(prompt_path, encoding="utf-8") as f:
             prompt_text = f.read()

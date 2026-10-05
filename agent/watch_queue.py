@@ -5,11 +5,14 @@ Startup (hard gate - watcher refuses to start if any FAIL):
     security_checks.run_all()    PHASE 0: production-org guard, branch protection,
                                  GitHub token scope
 
-Every poll cycle, BEFORE claiming a ticket (PHASE 0):
-    guards.check_budget()        monthly budget circuit-breaker
-    guards.check_daily_cap()     daily ticket cap
-  If either blocks, nothing is claimed - tickets stay ai-ready in Jira, so no
-  ticket is left half-processed. One alert per day per reason.
+Every poll cycle, BEFORE claiming a ticket:
+    code_index.build_or_update() PHASE 1: incremental re-index (fast, no AI) so
+                                 prepare_fix.py's localisation always sees the
+                                 latest merged code, not a stale snapshot.
+    guards.check_budget()        PHASE 0: monthly budget circuit-breaker
+    guards.check_daily_cap()     PHASE 0: daily ticket cap
+  If either guard blocks, nothing is claimed - tickets stay ai-ready in Jira,
+  so no ticket is left half-processed. One alert per day per reason.
 
 Per ticket:
     new run_id (shared with child steps via AGENT_RUN_ID)
@@ -21,7 +24,7 @@ Per ticket:
   The cost dashboard is refreshed after the agent step and at ticket end.
 
 .env: WATCH_POLL_INTERVAL_SECONDS=300, MONTHLY_BUDGET_USD, MAX_TICKETS_PER_DAY,
-      TICKET_CREDIT_CEILING, NOTIFY_* (see notify.py)
+      TICKET_CREDIT_CEILING, SF_PACKAGE_DIR, NOTIFY_* (see notify.py)
 """
 import os
 import sys
@@ -36,6 +39,7 @@ import events
 import guards
 import redact
 import security_checks
+import code_index
 
 try:
     import generate_cost_dashboard as dashboard
@@ -43,6 +47,7 @@ except Exception:
     dashboard = None
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))
 POLL_INTERVAL = int(os.getenv("WATCH_POLL_INTERVAL_SECONDS", "300"))
 
 PIPELINE_STEPS = [
@@ -75,6 +80,22 @@ def refresh_dashboard(key, when=""):
             print(f"  [dashboard] refreshed ({when}): {stats['n_tickets']} tickets, ${stats['total_cost']:.2f}")
     except Exception as e:
         print(f"  [dashboard] WARNING (non-blocking): {e}")
+
+
+def refresh_index(when=""):
+    """PHASE 1: incremental code-index rebuild. No AI cost - pure parsing.
+    Wrapped so an indexing problem can NEVER block ticket intake; the
+    localizer in prepare_fix.py already degrades to zero confidence (asks
+    for more info) if the index is missing or stale, so failing open here
+    is safe."""
+    try:
+        idx = code_index.build_or_update(REPO_ROOT)
+        print(f"  [index] refreshed ({when}): {idx['file_count']} files, "
+              f"{idx['reparsed_this_run']} re-parsed")
+        return idx
+    except Exception as e:
+        print(f"  [index] WARNING (non-blocking): could not refresh index: {e}")
+        return None
 
 
 def run_step(script, step, actor, key):
@@ -157,6 +178,13 @@ def process_ticket(key):
         events.emit_event(key, "run", "ok" if outcome == "pr_open" else "failed",
                           outcome=outcome, duration_s=round(time.time() - t0, 1))
         refresh_dashboard(key, "end of ticket")
+        # PHASE 1: the PR for this ticket isn't merged yet (that's a human
+        # action later), but re-indexing here is still cheap and harmless -
+        # it picks up the fix branch's own committed files for free and
+        # costs nothing if nothing changed. The authoritative refresh is
+        # still the one at the top of each poll cycle below, which runs
+        # against main after merges actually land.
+        refresh_index(when="end of ticket")
         os.environ.pop("AGENT_RUN_ID", None)
 
 
@@ -174,11 +202,18 @@ def poll_loop():
         notify.notify_failure(step="preflight", ticket="-", reason=redact.redact(reason))
         sys.exit("\nChecks failed. Fix the items above, then restart watch_queue.py.")
     events.emit_event("-", "startup", "ok")
+
+    # PHASE 1: build the index once at startup so the very first ticket
+    # claimed already has it available, rather than waiting for the first
+    # poll-cycle refresh below.
+    refresh_index(when="startup")
+
     print(f"\nWatching {jc.PROJECT} for ai-ready tickets every {POLL_INTERVAL}s (Ctrl+C to stop)...")
     print(f"Limits: budget ${guards.MONTHLY_BUDGET_USD:.0f}/month, {guards.MAX_TICKETS_PER_DAY} tickets/day, "
           f"{guards.TICKET_CREDIT_CEILING:.0f} credits/ticket")
     while True:
         try:
+            refresh_index(when="poll cycle")  # PHASE 1: pick up anything merged since last cycle
             if spending_gates_open():
                 key = claim_next()
                 if key:

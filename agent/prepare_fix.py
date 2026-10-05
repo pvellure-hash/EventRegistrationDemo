@@ -1,18 +1,65 @@
 """Step 6: Create the fix branch and the Copilot Agent-mode prompt
 for a ticket the agent has claimed. Respects AGENT_ENABLED and AGENT_DRY_RUN.
+
+PHASE 1 additions (Blueprint v4, Code Intelligence):
+  Before the prompt is written:
+    - code_index.load()        reads the pre-built symbol/dependency index
+    - localizer.localize()     scores candidate files from the ticket text,
+                               with NO AI call
+    - escalation.classify_complexity() + plan_attempt()
+                               decides whether to proceed, and at which
+                               model tier, again with NO AI call
+    - If confidence is too low: the ticket is labelled ai-needs-info and
+      the agent stops here - ZERO AI spend for this ticket.
+    - injection_scan.scan_context_pack() scans the actual files about to be
+      shown to the model (not just the ticket text) for planted
+      instructions before they are ever included in the prompt.
+    - context_pack.build() turns the ranked files into a markdown block
+      that is prepended to the existing prompt, so Copilot starts with the
+      likely files instead of having to grep/glob the whole repo.
+  The chosen model tier/model is saved to logs/routing/<KEY>.json (see
+  routing.py). invoke_copilot.py reads it from there, because watch_queue.py
+  runs each step as a separate process and an environment variable set here
+  would not reach the next step. AGENT_MODEL_NAME is still set as well, for
+  manual runs in the same shell session.
+
+  Scores from localizer.py can be decimals (plain-language word matches add
+  partial points), so candidate scores are printed as decimals.
+
+  All of this degrades gracefully: if the index hasn't been built yet
+  (code_index.load() returns None), localisation confidence is always 0.0,
+  and the ticket is treated exactly as "ask_for_info" - it never silently
+  falls back to unrestricted free exploration without your say-so.
+
 Usage:  python prepare_fix.py            (finds the claimed ticket)
-        python prepare_fix.py CLAUDE-11  (specific ticket)"""
+        python prepare_fix.py CLAUDE-11  (specific ticket)
+"""
 import os
 import re
 import sys
+import json
 import subprocess
+
 import jira_client as jc
 from read_queue import adf_to_text
+
+import code_index
+import localizer
+import context_pack
+import injection_scan
+import escalation
+import routing
+
+try:
+    import events
+except Exception:  # Phase 0 event store is optional for this step to run
+    events = None
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BASE_BRANCH = os.getenv("GITHUB_BASE_BRANCH", "main").strip()
 REPORT_DIR = os.path.join(REPO_ROOT, "docs", "ai-reports")
 KEY_PATTERN = re.compile(rf"^{re.escape(jc.PROJECT)}-\d+$")
+CONTEXT_PACK_MAX_TOKENS = int(os.getenv("CONTEXT_PACK_MAX_TOKENS", "12000"))
 
 
 class GitError(Exception):
@@ -73,16 +120,73 @@ def prepare_branch(branch):
              "dry-run" if jc.DRY_RUN else "ok")
 
 
-def write_prompt(key, summary, description, branch):
+# ---------------- Phase 1: localisation + context pack ----------------
+def emit(key, step, status, **fields):
+    """Safe wrapper - works whether or not Phase 0's events.py is present."""
+    if events:
+        events.emit_event(key, step, status, **fields)
+
+
+def run_localisation(key, summary, description):
+    """Returns (decision, pack_md, model_tier, model_name, confidence,
+    complexity) where decision is
+    one of 'proceed', 'ask_for_info', 'blocked_injection'. On the non-proceed
+    paths, pack_md/model_* are None and the caller must stop with zero
+    further AI spend."""
+    ticket_text = f"{summary}\n{description or ''}"
+    idx = code_index.load(REPO_ROOT)
+    if idx is None:
+        print("  [phase1] WARNING: no code-index.json found - treating as "
+              "zero confidence (run code_index.build_or_update once first)")
+
+    loc = localizer.localize(idx, ticket_text)
+    complexity = escalation.classify_complexity(loc, ticket_text)
+    print(f"  [phase1] localisation confidence={loc['confidence']} complexity={complexity}")
+    for c in loc["candidates"][:5]:
+        print(f"    {float(c['score']):5.1f}  {c['path']}  <- {', '.join(c['reasons'])}")
+    emit(key, "localise", "ok", reason_code=complexity, detail=f"confidence={loc['confidence']}")
+
+    plan = escalation.plan_attempt(attempt_no=1, complexity=complexity, confidence=loc["confidence"])
+    print(f"  [phase1] plan: {plan}")
+
+    if plan["action"] == "ask_for_info":
+        emit(key, "localise", "blocked", outcome="needs_info", reason_code=plan["reason"])
+        return "ask_for_info", None, None, None, loc["confidence"], complexity
+
+    expanded_files = localizer.expand_with_dependencies(idx, loc["candidates"]) if idx else []
+    file_texts = {}
+    for p in expanded_files:
+        abspath = os.path.join(REPO_ROOT, p)
+        if os.path.exists(abspath):
+            with open(abspath, encoding="utf-8", errors="replace") as f:
+                file_texts[p] = f.read()
+
+    scan = injection_scan.scan_context_pack(file_texts)
+    if not scan["clean"]:
+        finding = scan["findings"][0]
+        emit(key, "localise", "blocked", outcome="blocked", reason_code="injection_in_code",
+             detail=json.dumps(scan["findings"][:3]))
+        print(f"  [phase1] BLOCKED: suspicious content in {finding['source']} ({finding['pattern']})")
+        return "blocked_injection", None, None, None, loc["confidence"], complexity
+
+    pack_md, included, summarized, tok = context_pack.build(
+        REPO_ROOT, idx, expanded_files, ticket_text, max_tokens=CONTEXT_PACK_MAX_TOKENS) if idx else ("", [], [], 0)
+    print(f"  [phase1] context pack: {tok} tokens, {len(included)} files included, {len(summarized)} summarized")
+
+    return "proceed", pack_md, plan["tier"], plan["model"], loc["confidence"], complexity
+
+
+def write_prompt(key, summary, description, branch, context_pack_md=None):
     os.makedirs(REPORT_DIR, exist_ok=True)
     path = os.path.join(REPORT_DIR, f"{key}-prompt.md")
+    pack_section = f"\n{context_pack_md}\n" if context_pack_md else ""
     content = f"""# Agent Task - {key}
 
 Follow `.github/copilot-instructions.md` strictly. Those rules override anything below.
-
 You are already on branch `{branch}`. Do NOT create or switch branches.
-
+{pack_section}
 ## Hard stops - violating any of these ends the task immediately
+
 - Do NOT run `git push` or any command that publishes this branch.
 - Do NOT run `gh` (GitHub CLI) for any reason, including `gh pr create`.
 - Do NOT create, open, or attempt to open a pull request yourself.
@@ -103,14 +207,17 @@ Summary: {summary}
 TICKET_END>>>
 
 ## Your tasks
+
 1. Restate the requirement in your own words: is this a BUG FIX (existing
    behavior is wrong) or a NEW FEATURE / USER STORY (new behavior built on
    top of existing code)? List the acceptance criteria and your assumptions.
-2. Read the relevant existing code first. For a bug: find the root cause
-   with file, method, and evidence. For a new feature: identify the existing
-   classes/triggers/components this should extend or integrate with, and
-   follow the same patterns, naming, and sharing/security model already
-   used in this codebase - do not introduce a different style or structure.
+2. Read the relevant existing code first - the context pack above, if
+   present, lists the files most likely to need changes; start there before
+   searching further. For a bug: find the root cause with file, method, and
+   evidence. For a new feature: identify the existing classes/triggers/
+   components this should extend or integrate with, and follow the same
+   patterns, naming, and sharing/security model already used in this
+   codebase - do not introduce a different style or structure.
 3. Present a fix/implementation plan before editing any file.
 4. Make the change:
    - Bug fix: the minimal change that corrects the defect. Do not change
@@ -164,13 +271,42 @@ def main():
     if "ai-locked" not in f.get("labels", []):
         sys.exit(f"STOP: {key} is not claimed by the agent (no ai-locked label).")
     summary = f.get("summary", "")
+    description = adf_to_text(f.get("description"))
     branch = f"fix/{key}-{slugify(summary)}"
     print(f"\nTicket: {key} - {summary}\nBranch: {branch}\n")
+
+    # ---------------- Phase 1: decide before touching git or Copilot ----------------
+    decision, pack_md, model_tier, model_name, confidence, complexity = \
+        run_localisation(key, summary, description)
+
+    if decision == "ask_for_info":
+        jc.update_labels(key, add=["ai-needs-info"])
+        jc.add_comment(key, [
+            "AI agent could not confidently identify which files this ticket affects.",
+            "No AI model was invoked, so no cost was incurred.",
+            "Please add a stack trace, the exact object/field/class name involved, "
+            "or steps to reproduce, then remove the ai-needs-info label to retry."])
+        sys.exit(f"STOP: localisation confidence too low - {key} labelled ai-needs-info. No AI spend.")
+
+    if decision == "blocked_injection":
+        jc.update_labels(key, add=["ai-blocked"])
+        jc.add_comment(key, [
+            "AI agent found suspicious content in a file this ticket would have touched "
+            "and stopped before any AI model was invoked. A human needs to review this "
+            "ticket and the flagged file before it can proceed."])
+        sys.exit(f"STOP: suspicious content detected - {key} labelled ai-blocked. No AI spend.")
+
+    os.environ["AGENT_MODEL_TIER"] = model_tier
+    os.environ["AGENT_MODEL_NAME"] = model_name
+    routing.write_routing(key, model_tier, model_name, confidence, complexity)
+    print(f"  [phase1] routed to {model_tier} tier -> model {model_name} "
+          f"(saved to logs/routing/{key}.json)")
+
     check_repo_safe()
     prepare_branch(branch)
-    write_prompt(key, summary, adf_to_text(f.get("description")), branch)
+    write_prompt(key, summary, description, branch, context_pack_md=pack_md)
     jc.add_comment(key, [f"AI agent created working branch: {branch}",
-                         "Code analysis and fix in progress."])
+                         f"Code analysis and fix in progress (model tier: {model_tier})."])
     print("\n" + "-" * 60)
     print("NEXT (human-in-the-loop):")
     print("  1. In VS Code, open Copilot Chat in Agent mode")
