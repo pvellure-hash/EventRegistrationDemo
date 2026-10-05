@@ -1,10 +1,8 @@
 """Step 0: Long-running watcher.
-
 Startup (hard gate - watcher refuses to start if any FAIL):
     preflight.run_all()          repo state, Copilot CLI, credentials, Salesforce
     security_checks.run_all()    PHASE 0: production-org guard, branch protection,
                                  GitHub token scope
-
 Every poll cycle, BEFORE claiming a ticket:
     code_index.build_or_update() PHASE 1: incremental re-index (fast, no AI) so
                                  prepare_fix.py's localisation always sees the
@@ -13,7 +11,6 @@ Every poll cycle, BEFORE claiming a ticket:
     guards.check_daily_cap()     PHASE 0: daily ticket cap
   If either guard blocks, nothing is claimed - tickets stay ai-ready in Jira,
   so no ticket is left half-processed. One alert per day per reason.
-
 Per ticket:
     new run_id (shared with child steps via AGENT_RUN_ID)
     preflight.check_git_state() + production-org re-check
@@ -21,8 +18,10 @@ Per ticket:
       -> create_pr -> update_jira
   Every step emits started/ok/failed run events with durations, so the
   funnel and cycle times are measured without changing the other scripts.
-  The cost dashboard is refreshed after the agent step and at ticket end.
-
+  The cost dashboard AND the full pipeline command-center dashboard
+  (Phase 2 - generate_pipeline_dashboard.py) are both refreshed after the
+  agent step and at ticket end, so either dashboard reflects every ticket
+  run so far without any manual step.
 .env: WATCH_POLL_INTERVAL_SECONDS=300, MONTHLY_BUDGET_USD, MAX_TICKETS_PER_DAY,
       TICKET_CREDIT_CEILING, SF_PACKAGE_DIR, NOTIFY_* (see notify.py)
 """
@@ -31,7 +30,6 @@ import sys
 import time
 import datetime
 import subprocess
-
 import jira_client as jc
 import notify
 import preflight
@@ -40,16 +38,13 @@ import guards
 import redact
 import security_checks
 import code_index
-
 try:
     import generate_cost_dashboard as dashboard
 except Exception:
     dashboard = None
-
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))
 POLL_INTERVAL = int(os.getenv("WATCH_POLL_INTERVAL_SECONDS", "300"))
-
 PIPELINE_STEPS = [
     ("prepare_fix.py", "prepare", "system"),
     ("invoke_copilot.py", "agent_step", "agent"),
@@ -60,28 +55,35 @@ PIPELINE_STEPS = [
 ]
 OUTCOME_ON_FAIL = {"prepare": "blocked", "agent_step": "agent_failed", "review": "rejected_gate",
                    "validate": "failed_validation", "pr": "pr_failed", "jira": "jira_failed"}
-
 _alerted = {}
-
-
 def alert_once_per_day(reason_key, step, reason):
     today = datetime.date.today()
     if _alerted.get(reason_key) != today:
         _alerted[reason_key] = today
         notify.notify_failure(step=step, ticket="-", reason=redact.redact(reason))
-
-
 def refresh_dashboard(key, when=""):
-    if not dashboard:
-        return
+    if dashboard:
+        try:
+            stats = dashboard.generate_dashboard(quiet=True)
+            if stats:
+                print(f"  [dashboard] refreshed ({when}): {stats['n_tickets']} tickets, ${stats['total_cost']:.2f}")
+        except Exception as e:
+            print(f"  [dashboard] WARNING (non-blocking): {e}")
+    # PHASE 2: full pipeline command-center dashboard, rebuilt from the
+    # real run-events.jsonl (+ per-ticket usage/PR files) every time this
+    # fires - same "never block the loop" principle as the cost dashboard
+    # above, so a dashboard problem can never stop ticket processing.
     try:
-        stats = dashboard.generate_dashboard(quiet=True)
-        if stats:
-            print(f"  [dashboard] refreshed ({when}): {stats['n_tickets']} tickets, ${stats['total_cost']:.2f}")
+        r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, "generate_pipeline_dashboard.py")],
+                           cwd=AGENT_DIR, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode == 0:
+            out = r.stdout.strip().splitlines()
+            if out:
+                print(f"  {out[-1]}")
+        else:
+            print(f"  [pipeline-dashboard] WARNING (non-blocking): exit {r.returncode}: {r.stderr.strip()[:200]}")
     except Exception as e:
-        print(f"  [dashboard] WARNING (non-blocking): {e}")
-
-
+        print(f"  [pipeline-dashboard] WARNING (non-blocking): {e}")
 def refresh_index(when=""):
     """PHASE 1: incremental code-index rebuild. No AI cost - pure parsing.
     Wrapped so an indexing problem can NEVER block ticket intake; the
@@ -96,8 +98,6 @@ def refresh_index(when=""):
     except Exception as e:
         print(f"  [index] WARNING (non-blocking): could not refresh index: {e}")
         return None
-
-
 def run_step(script, step, actor, key):
     print(f"\n>>> {script} {key}")
     events.emit_event(key, step, "started", actor=actor)
@@ -110,8 +110,6 @@ def run_step(script, step, actor, key):
     if script == "invoke_copilot.py":
         refresh_dashboard(key, "after agent")
     return ok, step
-
-
 def claim_next():
     r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, "claim_ticket.py")],
                        cwd=AGENT_DIR, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -123,8 +121,6 @@ def claim_next():
             val = line.split("Claimed:", 1)[1].strip()
             return None if val == "none" else val
     return None
-
-
 def spending_gates_open():
     evs = events.read_events()
     for name, (ok, why) in (("budget", guards.check_budget(evs)), ("daily_cap", guards.check_daily_cap(evs))):
@@ -137,8 +133,6 @@ def spending_gates_open():
             print(f"  {why}")
             alert_once_per_day(name + "_warn", "budget_warning", why)
     return True
-
-
 def resync_before_ticket(key):
     print(f"\n--- Re-checks before {key} ---")
     results = preflight.check_git_state() + security_checks.check_salesforce_org()
@@ -151,8 +145,6 @@ def resync_before_ticket(key):
     jc.audit("watch_queue", key, f"skipped - re-check failed: {reason}", "failed")
     notify.notify_failure(step="preflight", ticket=key, reason=redact.redact(reason))
     return False
-
-
 def process_ticket(key):
     os.environ["AGENT_RUN_ID"] = events.new_run_id(key)
     print("\n" + "#" * 60 + f"\n# Processing {key}  (run {os.environ['AGENT_RUN_ID']})\n" + "#" * 60)
@@ -186,8 +178,6 @@ def process_ticket(key):
         # against main after merges actually land.
         refresh_index(when="end of ticket")
         os.environ.pop("AGENT_RUN_ID", None)
-
-
 def poll_loop():
     if not jc.ENABLED:
         sys.exit("Agent disabled (AGENT_ENABLED is not 'true'). Stopping.")
@@ -202,12 +192,10 @@ def poll_loop():
         notify.notify_failure(step="preflight", ticket="-", reason=redact.redact(reason))
         sys.exit("\nChecks failed. Fix the items above, then restart watch_queue.py.")
     events.emit_event("-", "startup", "ok")
-
     # PHASE 1: build the index once at startup so the very first ticket
     # claimed already has it available, rather than waiting for the first
     # poll-cycle refresh below.
     refresh_index(when="startup")
-
     print(f"\nWatching {jc.PROJECT} for ai-ready tickets every {POLL_INTERVAL}s (Ctrl+C to stop)...")
     print(f"Limits: budget ${guards.MONTHLY_BUDGET_USD:.0f}/month, {guards.MAX_TICKETS_PER_DAY} tickets/day, "
           f"{guards.TICKET_CREDIT_CEILING:.0f} credits/ticket")
@@ -225,8 +213,6 @@ def poll_loop():
             jc.audit("watch_queue", "-", redact.redact(str(e)), "failed")
             notify.notify_failure(step="poll_loop", ticket="-", reason=redact.redact(str(e)))
         time.sleep(POLL_INTERVAL)
-
-
 if __name__ == "__main__":
     try:
         poll_loop()
