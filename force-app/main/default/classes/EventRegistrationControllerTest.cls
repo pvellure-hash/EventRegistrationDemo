@@ -33,15 +33,16 @@ private class EventRegistrationControllerTest {
 
     @isTest
     static void testInvalidEmailIsRejected() {
-        Boolean threw = false;
+        String errorMessage;
         try {
             EventRegistrationController.submitRegistration(
-                'John Smith', 'not-an-email', null, 2, Date.today().addDays(5)
+                'John Smith', 'notanemail', null, 2, Date.today().addDays(5)
             );
         } catch (AuraHandledException e) {
-            threw = true;
+            errorMessage = e.getMessage();
         }
-        System.assert(threw, 'Invalid email format should be rejected.');
+        System.assertEquals('A valid email address is required.', errorMessage,
+            'CLAUDE-15: Invalid email format should be rejected with a clear message.');
     }
 
     @isTest
