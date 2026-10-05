@@ -26,6 +26,20 @@ prompt is now piped via stdin instead, which has no such limit. `-p` must
 stay OUT of cmd for this to work: Copilot CLI ignores piped stdin if a
 -p/--prompt argument is also present.
 
+PHASE 0 FIX (Issue C10, Oct 2026): hardcoded --model names (gpt-4.1,
+claude-sonnet-4.5, and later gpt-5.4 and every other name tried) kept
+being rejected as "not available", even names taken from the live
+/model picker - most likely org/plan policy restricts which exact names
+--model accepts non-interactively. GitHub also has no non-interactive
+way to list currently valid names (open upstream request:
+github/copilot-cli#700), so any hardcoded name or name list is fragile
+long-term. Fix: use Copilot CLI's own `--model auto --auto-tier
+<preference>` routing instead of naming a model at all. escalation.py's
+economy/standard/premium tiers map 1:1 onto auto-tier's
+efficiency/balance/intelligence, so "pick a model sized to the defect"
+is delegated to Copilot's own routing (see model_resolve.py) rather than
+a name we'd have to keep updating by hand.
+
 ONE-TIME SETUP (already done per machine/repo): run `copilot` once from the
 repo root and accept "trust this folder" with "remember".
 
@@ -54,6 +68,7 @@ import redact
 import security_checks
 import tool_allowlist
 import routing
+import model_resolve
 
 try:
     import notify
@@ -152,9 +167,16 @@ def main():
 
     global CLI_MODEL
     routed = routing.read_routing(key)
-    if routed and routed.get("model"):
-        CLI_MODEL = routed["model"]
-        print(f"  model  : {CLI_MODEL} ({routed['tier']} tier, routed by prepare_fix.py)")
+    routed_tier = routed.get("tier") if routed else None
+
+    # Issue C10 fix: delegate model choice to Copilot CLI's own
+    # --model auto --auto-tier routing instead of naming an exact model.
+    # An explicit .env override (AGENT_MODEL_NAME / COPILOT_CLI_MODEL)
+    # still wins if set, for deliberately pinning one model.
+    model_args = model_resolve.model_cli_args(routed_tier, explicit_model=CLI_MODEL or None)
+    print(f"  model  : {model_resolve.describe(routed_tier, explicit_model=CLI_MODEL or None)}")
+    if routed_tier:
+        print(f"  tier   : {routed_tier} (routed by prepare_fix.py)")
 
     print("=" * 60)
     print(f"AGENT INVOKE COPILOT CLI | {key} | Dry run: {jc.DRY_RUN}")
@@ -209,21 +231,20 @@ def main():
         with open(prompt_path, encoding="utf-8") as f:
             prompt_text = f.read()
 
-        # Issue C9 fix: prompt goes in via stdin (no size limit), NOT as a
-        # -p command-line argument (capped at 8,191 chars by cmd.exe on
-        # Windows, since the npm `copilot` shim always runs through cmd.exe).
-        cmd = [cli, "-s", "--no-ask-user",
-               "--allow-tool", ALLOW_TOOLS, "--deny-tool", DENY_TOOLS]
-        if CLI_MODEL:
-            cmd += ["--model", CLI_MODEL]
-
         # The .env GITHUB_TOKEN is a PR-only PAT without Copilot permission;
         # strip it so the CLI uses its own `copilot login` session.
         cli_env = os.environ.copy()
         for var in ("GITHUB_TOKEN", "GH_TOKEN", "COPILOT_GITHUB_TOKEN"):
             cli_env.pop(var, None)
 
-        events.emit_event(key, "agent", "started", actor="agent", model=CLI_MODEL or "default")
+        # Issue C9 fix: prompt goes in via stdin (no size limit), NOT as a
+        # -p command-line argument (capped at 8,191 chars by cmd.exe on
+        # Windows, since the npm `copilot` shim always runs through cmd.exe).
+        cmd = [cli, "-s", "--no-ask-user",
+               "--allow-tool", ALLOW_TOOLS, "--deny-tool", DENY_TOOLS] + model_args
+
+        events.emit_event(key, "agent", "started", actor="agent",
+                          model=(CLI_MODEL or " ".join(model_args)))
         print(f"  Running Copilot CLI headlessly (timeout {CLI_TIMEOUT_MIN} min)...")
         t0 = time.time()
         try:
@@ -241,7 +262,7 @@ def main():
         log_path = os.path.join(events.log_dir(), f"{key}-copilot-cli.log")
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"CMD: copilot (prompt via stdin, {len(prompt_text)} chars) -s --no-ask-user "
-                    f"--allow-tool {ALLOW_TOOLS} --deny-tool {DENY_TOOLS}\n\n"
+                    f"--allow-tool {ALLOW_TOOLS} --deny-tool {DENY_TOOLS} {' '.join(model_args)}\n\n"
                     f"STDOUT:\n{redact.redact(r.stdout)}\n\nSTDERR:\n{redact.redact(r.stderr)}\n")
 
         record_run(key, r.stdout, r.stderr, time.time() - t0, timed_out=False, exit_code=r.returncode)
