@@ -109,28 +109,30 @@ private class EventRegistrationControllerTest {
 
     @isTest
     static void testPastEventDateIsRejected() {
-        Boolean threw = false;
+        String errorMessage;
         try {
             EventRegistrationController.submitRegistration(
                 'John Smith', 'john@example.com', null, 2, Date.today().addDays(-1)
             );
         } catch (AuraHandledException e) {
-            threw = true;
+            errorMessage = e.getMessage();
         }
-        System.assert(threw, 'A past event date should be rejected.');
+        System.assertEquals('Event date must be in the future.', errorMessage,
+            'CLAUDE-17: A past event date should be rejected with the expected message.');
     }
 
     @isTest
     static void testTodayEventDateIsRejected() {
-        Boolean threw = false;
+        String errorMessage;
         try {
             EventRegistrationController.submitRegistration(
                 'John Smith', 'john@example.com', null, 2, Date.today()
             );
         } catch (AuraHandledException e) {
-            threw = true;
+            errorMessage = e.getMessage();
         }
-        System.assert(threw, 'Same-day event date should be rejected (must be strictly in the future).');
+        System.assertEquals('Event date must be in the future.', errorMessage,
+            'CLAUDE-17: A same-day event date should be rejected with the expected message.');
     }
 
     @isTest
