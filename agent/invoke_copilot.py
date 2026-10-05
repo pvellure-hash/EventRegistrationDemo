@@ -40,6 +40,21 @@ efficiency/balance/intelligence, so "pick a model sized to the defect"
 is delegated to Copilot's own routing (see model_resolve.py) rather than
 a name we'd have to keep updating by hand.
 
+PHASE 0 FIX (Issue C12, Oct 2026): "-s" (silent) output never contains an
+"AI Credits" line, so the regex parser below always came back empty and
+every run was logged with unknown cost - meaning the monthly budget and
+per-ticket ceiling gates were blind to real spend. Fix: pass
+`--usage-output-file <path>` (documented in `copilot --help`) so the CLI
+writes a JSON usage record to disk regardless of -s. The exact field
+names in that JSON were not confirmed anywhere in this project before
+this fix, so parse_usage_file() below makes a best-effort guess (any
+numeric field with "credit" in its name, preferring one with "total")
+and ALWAYS prints the raw file content to the console. Treat the first
+few real runs as verification: compare the printed raw JSON against the
+guessed value, and tighten parse_usage_file() once the real schema is
+confirmed. The old regex-on-stdout approach is kept as a fallback only,
+for the (expected to be rare) case where the usage file isn't written.
+
 ONE-TIME SETUP (already done per machine/repo): run `copilot` once from the
 repo root and accept "trust this folder" with "remember".
 
@@ -94,6 +109,9 @@ AI_CREDITS_PATTERNS = [
 
 
 def parse_ai_credits(cli_output):
+    """Fallback only (Issue C12): the CLI's own usage-output-file is tried
+    first in record_run(). This regex path is kept in case that file is
+    ever missing, but in -s mode it has not been observed to match."""
     for pattern in AI_CREDITS_PATTERNS:
         m = pattern.search(cli_output or "")
         if m:
@@ -102,6 +120,55 @@ def parse_ai_credits(cli_output):
             except ValueError:
                 continue
     return None
+
+
+def parse_usage_file(path):
+    """Issue C12 fix. Reads the JSON written by `--usage-output-file`.
+
+    The real field names have not been confirmed against this account's
+    Copilot CLI version, so this makes a best-effort, defensive guess:
+    any numeric field anywhere in the JSON whose key contains "credit"
+    (case-insensitive), preferring one whose key also contains "total".
+
+    Returns (guessed_credits_or_None, raw_text_or_None). The caller
+    always prints raw_text so a human can confirm/correct the guess -
+    do not trust guessed_credits blindly until that's been checked
+    against a few real runs.
+    """
+    if not path or not os.path.exists(path):
+        return None, None
+    try:
+        raw = open(path, encoding="utf-8").read()
+    except Exception as e:
+        print(f"  [usage-file] WARNING: could not read {path}: {e}")
+        return None, None
+    if not raw.strip():
+        return None, raw
+    try:
+        data = json.loads(raw)
+    except Exception:
+        print(f"  [usage-file] WARNING: {path} is not valid JSON; see raw content above.")
+        return None, raw
+
+    candidates = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and "credit" in k.lower():
+                    candidates.append((k, float(v)))
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(data)
+    if not candidates:
+        return None, raw
+    for k, v in candidates:
+        if "total" in k.lower():
+            return v, raw
+    return candidates[0][1], raw
 
 
 def legacy_cost_log(key, credits, timed_out):
@@ -130,19 +197,37 @@ def stop(key, step_reason, outcome, message, notify_too=True):
     sys.exit(f"STOP: {message}")
 
 
-def record_run(key, r_stdout, r_stderr, duration, timed_out, exit_code):
-    credits = parse_ai_credits((r_stdout or "") + (r_stderr or ""))
+def record_run(key, r_stdout, r_stderr, duration, timed_out, exit_code, usage_path=None):
+    # Issue C12 fix: try the usage-output-file JSON first; fall back to the
+    # old stdout/stderr regex only if that file is missing or unparseable.
+    usage_credits, usage_raw = parse_usage_file(usage_path)
+    if usage_raw is not None:
+        print(f"  [usage-file] {usage_path}")
+        print("  [usage-file] raw contents (verify the credits field manually):")
+        for line in usage_raw.splitlines():
+            print(f"    {line}")
+        if usage_credits is not None:
+            print(f"  [usage-file] guessed credits field = {usage_credits} (confirm against raw JSON above)")
+        else:
+            print("  [usage-file] WARNING: no field with 'credit' in its name was found in the JSON above.")
+
+    credits = usage_credits
+    credits_source = "usage_file"
+    if credits is None:
+        credits = parse_ai_credits((r_stdout or "") + (r_stderr or ""))
+        credits_source = "stdout_regex" if credits is not None else "none"
+
     status = "failed" if (timed_out or exit_code != 0) else "ok"
     events.emit_event(key, "agent", status, actor="agent", model=CLI_MODEL or "default",
                       ai_credits=credits, duration_s=round(duration, 1),
                       outcome="timed_out" if timed_out else None,
                       reason_code=("timeout" if timed_out else (f"exit_{exit_code}" if exit_code else None)),
-                      credits_parsed=credits is not None)
+                      credits_parsed=credits is not None, credits_source=credits_source)
     legacy_cost_log(key, credits, timed_out)
     if credits is None:
-        print("  cost: WARNING - 'AI Credits' line not found in CLI output; recorded as unknown.")
+        print("  cost: WARNING - credits not found in usage file or CLI output; recorded as unknown.")
     else:
-        print(f"  cost: {credits:.2f} AI credits (~${credits * events.CREDIT_TO_USD:.2f})")
+        print(f"  cost: {credits:.2f} AI credits (~${credits * events.CREDIT_TO_USD:.2f}) [source: {credits_source}]")
         if credits >= guards.TICKET_CREDIT_CEILING:
             msg = (f"single run used {credits:.2f} credits, above the per-ticket ceiling "
                    f"({guards.TICKET_CREDIT_CEILING:.0f}). Further attempts on {key} are blocked.")
@@ -237,11 +322,17 @@ def main():
         for var in ("GITHUB_TOKEN", "GH_TOKEN", "COPILOT_GITHUB_TOKEN"):
             cli_env.pop(var, None)
 
+        # Issue C12 fix: ask Copilot CLI to also write a JSON usage/credits
+        # record to disk, since -s (silent) output never contains the
+        # "AI Credits" line the old regex parser was looking for.
+        usage_path = os.path.join(events.log_dir(), f"{key}-usage.json")
+
         # Issue C9 fix: prompt goes in via stdin (no size limit), NOT as a
         # -p command-line argument (capped at 8,191 chars by cmd.exe on
         # Windows, since the npm `copilot` shim always runs through cmd.exe).
         cmd = [cli, "-s", "--no-ask-user",
-               "--allow-tool", ALLOW_TOOLS, "--deny-tool", DENY_TOOLS] + model_args
+               "--allow-tool", ALLOW_TOOLS, "--deny-tool", DENY_TOOLS,
+               "--usage-output-file", usage_path] + model_args
 
         events.emit_event(key, "agent", "started", actor="agent",
                           model=(CLI_MODEL or " ".join(model_args)))
@@ -255,17 +346,19 @@ def main():
         except subprocess.TimeoutExpired as e:
             out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
             err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-            record_run(key, out, err, time.time() - t0, timed_out=True, exit_code=124)
+            record_run(key, out, err, time.time() - t0, timed_out=True, exit_code=124, usage_path=usage_path)
             jc.audit("invoke_copilot", key, f"timed out after {CLI_TIMEOUT_MIN} min", "failed")
             sys.exit("FAIL: Copilot CLI timed out.")
 
         log_path = os.path.join(events.log_dir(), f"{key}-copilot-cli.log")
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"CMD: copilot (prompt via stdin, {len(prompt_text)} chars) -s --no-ask-user "
-                    f"--allow-tool {ALLOW_TOOLS} --deny-tool {DENY_TOOLS} {' '.join(model_args)}\n\n"
+                    f"--allow-tool {ALLOW_TOOLS} --deny-tool {DENY_TOOLS} "
+                    f"--usage-output-file {usage_path} {' '.join(model_args)}\n\n"
                     f"STDOUT:\n{redact.redact(r.stdout)}\n\nSTDERR:\n{redact.redact(r.stderr)}\n")
 
-        record_run(key, r.stdout, r.stderr, time.time() - t0, timed_out=False, exit_code=r.returncode)
+        record_run(key, r.stdout, r.stderr, time.time() - t0, timed_out=False, exit_code=r.returncode,
+                   usage_path=usage_path)
 
         if r.returncode != 0:
             jc.audit("invoke_copilot", key, f"exit {r.returncode} - see {log_path}", "failed")
