@@ -3,6 +3,7 @@ import os
 import json
 import datetime
 import requests
+import redact
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,6 +26,7 @@ class JiraError(Exception):
 
 def audit(action, key, detail="", result="ok"):
     """Append one line to the audit log (JSON lines format)."""
+    detail = redact.redact(detail)
     os.makedirs("logs", exist_ok=True)
     entry = {
         "time": datetime.datetime.now().isoformat(timespec="seconds"),

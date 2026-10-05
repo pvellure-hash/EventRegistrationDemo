@@ -41,6 +41,7 @@ import json
 import os
 import subprocess
 import time
+import redact
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))
@@ -204,6 +205,7 @@ def notify_failure(step: str, ticket: str, reason: str = ""):
     """Call whenever a pipeline step fails, is rejected, or pre-flight
     checks block a start. step='preflight' is treated as its own category
     so recipients can subscribe to it separately from per-ticket failures."""
+    reason = redact.redact(reason)
     if not NOTIFY_ENABLED:
         return
 

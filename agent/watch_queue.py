@@ -1,70 +1,99 @@
-"""Step 0: Long-running watcher. NEW: runs automated pre-flight checks
-(preflight.py) once at startup as a hard gate, and a lightweight re-sync
-check before every ticket, so the agent never starts fixing code against a
-stale or diverged local repo.
+"""Step 0: Long-running watcher.
 
-Startup sequence:
-    preflight.run_all() — Repository state (incl. fast-forward sync to the
-    latest origin/main), Copilot CLI, credentials, Salesforce. If ANY check
-    fails, the watcher notifies and REFUSES to start polling at all.
+Startup (hard gate - watcher refuses to start if any FAIL):
+    preflight.run_all()          repo state, Copilot CLI, credentials, Salesforce
+    security_checks.run_all()    PHASE 0: production-org guard, branch protection,
+                                 GitHub token scope
 
-Per-ticket sequence (after claim_ticket.py claims one):
-    preflight.check_git_state() — a lighter re-check (clean tree, correct
-    branch, fast-forward-sync to latest origin/main) run immediately before
-    prepare_fix.py cuts a new branch. This matters because the watcher may
-    run for hours; someone could merge a PR in the meantime. If this fails,
-    only THIS ticket is skipped (with a notification) - not the whole
-    watcher - since the next ticket may well be fine.
+Every poll cycle, BEFORE claiming a ticket (PHASE 0):
+    guards.check_budget()        monthly budget circuit-breaker
+    guards.check_daily_cap()     daily ticket cap
+  If either blocks, nothing is claimed - tickets stay ai-ready in Jira, so no
+  ticket is left half-processed. One alert per day per reason.
 
-    claim_ticket -> [re-sync check] -> prepare_fix -> invoke_copilot
-        (headless CLI fix) -> review_gate (BLOCKS for y/n)
-        -> validate_fix -> create_pr -> update_jira
+Per ticket:
+    new run_id (shared with child steps via AGENT_RUN_ID)
+    preflight.check_git_state() + production-org re-check
+    prepare_fix -> invoke_copilot -> review_gate (human y/n) -> validate_fix
+      -> create_pr -> update_jira
+  Every step emits started/ok/failed run events with durations, so the
+  funnel and cycle times are measured without changing the other scripts.
+  The cost dashboard is refreshed after the agent step and at ticket end.
 
-Sequential, one ticket at a time, start to finish - no overlap by design
-(blocking subprocess calls). Respects AGENT_ENABLED / AGENT_DRY_RUN.
-
-Notifications: any step failure, a failed pre-flight start, or a
-skipped-ticket re-sync failure calls notify.notify_failure(...), which
-shows a Windows toast, logs to logs/notifications.jsonl, and (if enabled)
-emails everyone in agent/recipients.json subscribed to that category.
-
-.env additions needed:
-    WATCH_POLL_INTERVAL_SECONDS=300
-    NOTIFY_ENABLED=true / NOTIFY_TOAST_ENABLED=true / NOTIFY_EMAIL_ENABLED=...
-See preflight.py and notify.py for full detail.
+.env: WATCH_POLL_INTERVAL_SECONDS=300, MONTHLY_BUDGET_USD, MAX_TICKETS_PER_DAY,
+      TICKET_CREDIT_CEILING, NOTIFY_* (see notify.py)
 """
 import os
 import sys
 import time
+import datetime
 import subprocess
+
 import jira_client as jc
 import notify
 import preflight
+import events
+import guards
+import redact
+import security_checks
+
+try:
+    import generate_cost_dashboard as dashboard
+except Exception:
+    dashboard = None
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 POLL_INTERVAL = int(os.getenv("WATCH_POLL_INTERVAL_SECONDS", "300"))
 
 PIPELINE_STEPS = [
-    "prepare_fix.py",
-    "invoke_copilot.py",
-    "review_gate.py",
-    "validate_fix.py",
-    "create_pr.py",
-    "update_jira.py",
+    ("prepare_fix.py", "prepare", "system"),
+    ("invoke_copilot.py", "agent_step", "agent"),
+    ("review_gate.py", "review", "human"),
+    ("validate_fix.py", "validate", "system"),
+    ("create_pr.py", "pr", "system"),
+    ("update_jira.py", "jira", "system"),
 ]
+OUTCOME_ON_FAIL = {"prepare": "blocked", "agent_step": "agent_failed", "review": "rejected_gate",
+                   "validate": "failed_validation", "pr": "pr_failed", "jira": "jira_failed"}
+
+_alerted = {}
 
 
-def run_step(script, key):
-    path = os.path.join(AGENT_DIR, script)
+def alert_once_per_day(reason_key, step, reason):
+    today = datetime.date.today()
+    if _alerted.get(reason_key) != today:
+        _alerted[reason_key] = today
+        notify.notify_failure(step=step, ticket="-", reason=redact.redact(reason))
+
+
+def refresh_dashboard(key, when=""):
+    if not dashboard:
+        return
+    try:
+        stats = dashboard.generate_dashboard(quiet=True)
+        if stats:
+            print(f"  [dashboard] refreshed ({when}): {stats['n_tickets']} tickets, ${stats['total_cost']:.2f}")
+    except Exception as e:
+        print(f"  [dashboard] WARNING (non-blocking): {e}")
+
+
+def run_step(script, step, actor, key):
     print(f"\n>>> {script} {key}")
-    r = subprocess.run([sys.executable, path, key], cwd=AGENT_DIR)
-    return r.returncode == 0
+    events.emit_event(key, step, "started", actor=actor)
+    t0 = time.time()
+    r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, script), key], cwd=AGENT_DIR)
+    ok = r.returncode == 0
+    events.emit_event(key, step, "ok" if ok else "failed", actor=actor,
+                      duration_s=round(time.time() - t0, 1),
+                      reason_code=None if ok else f"exit_{r.returncode}")
+    if script == "invoke_copilot.py":
+        refresh_dashboard(key, "after agent")
+    return ok, step
 
 
 def claim_next():
     r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, "claim_ticket.py")],
-                       cwd=AGENT_DIR, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+                       cwd=AGENT_DIR, capture_output=True, text=True, encoding="utf-8", errors="replace")
     print(r.stdout)
     if r.stderr.strip():
         print(r.stderr, file=sys.stderr)
@@ -75,70 +104,91 @@ def claim_next():
     return None
 
 
+def spending_gates_open():
+    evs = events.read_events()
+    for name, (ok, why) in (("budget", guards.check_budget(evs)), ("daily_cap", guards.check_daily_cap(evs))):
+        if not ok:
+            print(f"[{time.strftime('%H:%M:%S')}] Not claiming: {why}")
+            jc.audit("watch_queue", "-", f"paused - {why}", "blocked")
+            alert_once_per_day(name, "spending_guard", f"Watcher paused, no tickets claimed: {why}")
+            return False
+        if why.startswith("WARN"):
+            print(f"  {why}")
+            alert_once_per_day(name + "_warn", "budget_warning", why)
+    return True
+
+
 def resync_before_ticket(key):
-    """Lightweight re-check, immediately before cutting a fix branch: is the
-    local repo clean, on the base branch, and fast-forwarded to the exact
-    latest origin/main? If not, skip this ticket (not the whole watcher)
-    and notify - the next poll cycle will retry it."""
-    print(f"\n--- Re-sync check before {key} ---")
-    results = preflight.check_git_state()
-    ok = all(passed for _, passed, _ in results)
+    print(f"\n--- Re-checks before {key} ---")
+    results = preflight.check_git_state() + security_checks.check_salesforce_org()
     for name, passed, detail in results:
         print(f"  {'PASS' if passed else 'FAIL'}  {name}  {'' if passed else detail}")
-    if not ok:
-        reason = preflight.failure_summary(results)
-        print(f"[{key}] Skipping this cycle - repo not in a safe state to branch from.")
-        jc.audit("watch_queue", key, f"skipped - resync check failed: {reason}", "failed")
-        notify.notify_failure(step="preflight", ticket=key, reason=reason)
-    return ok
+    if all(p for _, p, _ in results):
+        return True
+    reason = "; ".join(f"{n}: {d}" for n, p, d in results if not p)
+    events.emit_event(key, "precheck", "failed", outcome="blocked", reason_code="precheck", detail=reason)
+    jc.audit("watch_queue", key, f"skipped - re-check failed: {reason}", "failed")
+    notify.notify_failure(step="preflight", ticket=key, reason=redact.redact(reason))
+    return False
 
 
 def process_ticket(key):
-    print("\n" + "#" * 60)
-    print(f"# Processing {key}")
-    print("#" * 60)
-
-    if not resync_before_ticket(key):
-        return False
-
-    for script in PIPELINE_STEPS:
-        ok = run_step(script, key)
-        if not ok:
-            print(f"[{key}] Stopped at {script} (failed, auto-blocked, or you rejected it).")
-            jc.audit("watch_queue", key, f"stopped at {script}", "failed")
-            notify.notify_failure(step=script, ticket=key, reason=f"{script} exited non-zero")
+    os.environ["AGENT_RUN_ID"] = events.new_run_id(key)
+    print("\n" + "#" * 60 + f"\n# Processing {key}  (run {os.environ['AGENT_RUN_ID']})\n" + "#" * 60)
+    events.emit_event(key, "run", "started", actor="system")
+    t0 = time.time()
+    outcome = "pr_open"
+    try:
+        if not resync_before_ticket(key):
+            outcome = "blocked"
             return False
-    print(f"[{key}] Completed through Jira update. Draft PR awaiting human review/merge.")
-    jc.audit("watch_queue", key, "completed full pipeline", "ok")
-    return True
+        for script, step, actor in PIPELINE_STEPS:
+            ok, step = run_step(script, step, actor, key)
+            if not ok:
+                outcome = OUTCOME_ON_FAIL.get(step, "failed")
+                print(f"[{key}] Stopped at {script}.")
+                jc.audit("watch_queue", key, f"stopped at {script}", "failed")
+                notify.notify_failure(step=script, ticket=key, reason=f"{script} exited non-zero")
+                return False
+        print(f"[{key}] Completed. Draft PR awaiting human review/merge.")
+        jc.audit("watch_queue", key, "completed full pipeline", "ok")
+        return True
+    finally:
+        events.emit_event(key, "run", "ok" if outcome == "pr_open" else "failed",
+                          outcome=outcome, duration_s=round(time.time() - t0, 1))
+        refresh_dashboard(key, "end of ticket")
+        os.environ.pop("AGENT_RUN_ID", None)
 
 
 def poll_loop():
     if not jc.ENABLED:
         sys.exit("Agent disabled (AGENT_ENABLED is not 'true'). Stopping.")
-
-    print("Running pre-flight checks before starting the watcher...\n")
-    ok, results = preflight.run_all(verbose=True)
-    if not ok:
-        reason = preflight.failure_summary(results)
-        jc.audit("watch_queue", "-", f"pre-flight failed at startup: {reason}", "failed")
-        notify.notify_failure(step="preflight", ticket="-", reason=reason)
-        sys.exit("\nPre-flight checks failed. Fix the items above, then restart watch_queue.py.")
-
-    print(f"\nWatching project {jc.PROJECT} for ai-ready tickets every "
-          f"{POLL_INTERVAL}s (Ctrl+C to stop)...")
+    print("Running pre-flight and security checks...\n")
+    ok1, res1 = preflight.run_all(verbose=True)
+    print()
+    ok2, res2 = security_checks.run_all(verbose=True)
+    if not (ok1 and ok2):
+        reason = "; ".join(f"{n}: {d}" for n, p, d in res1 + res2 if not p)
+        events.emit_event("-", "startup", "failed", reason_code="preflight", detail=reason)
+        jc.audit("watch_queue", "-", f"startup checks failed: {reason}", "failed")
+        notify.notify_failure(step="preflight", ticket="-", reason=redact.redact(reason))
+        sys.exit("\nChecks failed. Fix the items above, then restart watch_queue.py.")
+    events.emit_event("-", "startup", "ok")
+    print(f"\nWatching {jc.PROJECT} for ai-ready tickets every {POLL_INTERVAL}s (Ctrl+C to stop)...")
+    print(f"Limits: budget ${guards.MONTHLY_BUDGET_USD:.0f}/month, {guards.MAX_TICKETS_PER_DAY} tickets/day, "
+          f"{guards.TICKET_CREDIT_CEILING:.0f} credits/ticket")
     while True:
         try:
-            key = claim_next()
-            if key:
-                process_ticket(key)
-            else:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
-                      f"Nothing claimed this cycle. Sleeping {POLL_INTERVAL}s.")
+            if spending_gates_open():
+                key = claim_next()
+                if key:
+                    process_ticket(key)
+                else:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Nothing claimed. Sleeping {POLL_INTERVAL}s.")
         except Exception as e:
             print(f"Error during poll cycle: {e}")
-            jc.audit("watch_queue", "-", str(e), "failed")
-            notify.notify_failure(step="poll_loop", ticket="-", reason=str(e))
+            jc.audit("watch_queue", "-", redact.redact(str(e)), "failed")
+            notify.notify_failure(step="poll_loop", ticket="-", reason=redact.redact(str(e)))
         time.sleep(POLL_INTERVAL)
 
 
