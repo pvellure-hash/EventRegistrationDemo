@@ -122,53 +122,70 @@ def parse_ai_credits(cli_output):
     return None
 
 
+NANO_AIU_PER_CREDIT = 1_000_000_000  # "nano" = 1e-9; confirmed empirically Oct 2026 (see note below)
+
+
 def parse_usage_file(path):
     """Issue C12 fix. Reads the JSON written by `--usage-output-file`.
 
-    The real field names have not been confirmed against this account's
-    Copilot CLI version, so this makes a best-effort, defensive guess:
-    any numeric field anywhere in the JSON whose key contains "credit"
-    (case-insensitive), preferring one whose key also contains "total".
+    CONFIRMED Oct 2026 against a real `copilot -s --usage-output-file`
+    call: this JSON has NO field whose key contains the word "credit" at
+    all (an earlier version of this function guessed by keyword and would
+    have silently failed here, logging every run as unknown - caught
+    before it reached a real ticket). The two real top-level candidates
+    are:
+      - totalPremiumRequestCost: a flat integer (1 for a trivial call);
+        does not appear to scale with token count, so likely a request
+        counter rather than the metered per-token cost described in this
+        project's billing notes.
+      - totalNanoAiu: scales with actual input/output/cache token usage,
+        consistent with "metered AI Credits ... based on input, output
+        and cached tokens". Treated here as nanos of one credit unit
+        (divide by 1e9) - this conversion is a best fit, not confirmed
+        against a GitHub billing-portal dollar figure yet. Revisit once a
+        real ticket's logged cost can be sanity-checked against an actual
+        invoice/billing page.
 
-    Returns (guessed_credits_or_None, raw_text_or_None). The caller
-    always prints raw_text so a human can confirm/correct the guess -
-    do not trust guessed_credits blindly until that's been checked
-    against a few real runs.
+    Returns (credits_or_None, raw_text_or_None, diagnostics_dict).
+    The caller always prints raw_text so a human can keep verifying this
+    against real runs - do not treat the credits value as exact until
+    cross-checked against GitHub's own billing numbers at least once.
     """
     if not path or not os.path.exists(path):
-        return None, None
+        return None, None, {}
     try:
         raw = open(path, encoding="utf-8").read()
     except Exception as e:
         print(f"  [usage-file] WARNING: could not read {path}: {e}")
-        return None, None
+        return None, None, {}
     if not raw.strip():
-        return None, raw
+        return None, raw, {}
     try:
         data = json.loads(raw)
     except Exception:
         print(f"  [usage-file] WARNING: {path} is not valid JSON; see raw content above.")
-        return None, raw
+        return None, raw, {}
 
-    candidates = []
+    diagnostics = {
+        "totalNanoAiu": data.get("totalNanoAiu"),
+        "totalPremiumRequestCost": data.get("totalPremiumRequestCost"),
+        "currentModel": data.get("currentModel"),
+    }
 
-    def walk(obj):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if isinstance(v, (int, float)) and not isinstance(v, bool) and "credit" in k.lower():
-                    candidates.append((k, float(v)))
-                walk(v)
-        elif isinstance(obj, list):
-            for v in obj:
-                walk(v)
+    nano = data.get("totalNanoAiu")
+    if isinstance(nano, (int, float)) and not isinstance(nano, bool):
+        return nano / NANO_AIU_PER_CREDIT, raw, diagnostics
 
-    walk(data)
-    if not candidates:
-        return None, raw
-    for k, v in candidates:
-        if "total" in k.lower():
-            return v, raw
-    return candidates[0][1], raw
+    # Fallback only if totalNanoAiu is ever absent: use the flat request
+    # cost counter, which is known to NOT scale with tokens - treat this
+    # path as a rough approximation, not equivalent to the primary one.
+    flat = data.get("totalPremiumRequestCost")
+    if isinstance(flat, (int, float)) and not isinstance(flat, bool):
+        print("  [usage-file] NOTE: totalNanoAiu missing; falling back to "
+              "totalPremiumRequestCost (flat counter, does not scale with tokens).")
+        return float(flat), raw, diagnostics
+
+    return None, raw, diagnostics
 
 
 def legacy_cost_log(key, credits, timed_out):
@@ -200,16 +217,20 @@ def stop(key, step_reason, outcome, message, notify_too=True):
 def record_run(key, r_stdout, r_stderr, duration, timed_out, exit_code, usage_path=None):
     # Issue C12 fix: try the usage-output-file JSON first; fall back to the
     # old stdout/stderr regex only if that file is missing or unparseable.
-    usage_credits, usage_raw = parse_usage_file(usage_path)
+    usage_credits, usage_raw, usage_diag = parse_usage_file(usage_path)
     if usage_raw is not None:
         print(f"  [usage-file] {usage_path}")
-        print("  [usage-file] raw contents (verify the credits field manually):")
+        print("  [usage-file] raw contents (kept visible for ongoing verification):")
         for line in usage_raw.splitlines():
             print(f"    {line}")
+        if usage_diag:
+            print(f"  [usage-file] totalNanoAiu={usage_diag.get('totalNanoAiu')} "
+                  f"totalPremiumRequestCost={usage_diag.get('totalPremiumRequestCost')} "
+                  f"model={usage_diag.get('currentModel')}")
         if usage_credits is not None:
-            print(f"  [usage-file] guessed credits field = {usage_credits} (confirm against raw JSON above)")
+            print(f"  [usage-file] credits = totalNanoAiu / 1e9 = {usage_credits:.4f}")
         else:
-            print("  [usage-file] WARNING: no field with 'credit' in its name was found in the JSON above.")
+            print("  [usage-file] WARNING: neither totalNanoAiu nor totalPremiumRequestCost found in the JSON above.")
 
     credits = usage_credits
     credits_source = "usage_file"
