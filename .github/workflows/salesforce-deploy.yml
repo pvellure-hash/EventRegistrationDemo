@@ -11,6 +11,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     name: deploy
+    environment: salesforce-deploy-gate
     steps:
       - name: Check out code
         uses: actions/checkout@v4
