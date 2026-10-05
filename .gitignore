@@ -21,3 +21,5 @@ docs/ai-reports/*-jira.md
 .DS_Store
 Thumbs.db
 .vscode/*.log
+
+logs/pipeline-dashboard.html
