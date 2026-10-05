@@ -72,7 +72,7 @@ public with sharing class EventRegistrationController {
             errors.add('Number of guests must be between ' + MIN_GUESTS + ' and ' + MAX_GUESTS + '.');
         }
 
-        if (eventDate == null || eventDate <= Date.today()) {
+        if (eventDate == null || eventDate < Date.today()) {
             errors.add('Event date must be in the future.');
         }
 
