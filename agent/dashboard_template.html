@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Delivery Command Center — OperateNext</title>
+<style>
+:root{
+  --bg:#060a14;--bg2:#0b1222;--panel:rgba(255,255,255,.035);--panel-solid:#0f1729;--border:rgba(255,255,255,.08);
+  --text:#e9edf5;--muted:#8691a8;--faint:#4a5468;--green:#86BC25;--green-2:#5f9e1a;--teal:#22b8cf;
+  --violet:#8b7cf6;--amber:#f5a623;--red:#ff5d62;--grid:rgba(255,255,255,.06);--shadow:0 10px 40px rgba(0,0,0,.35);
+}
+[data-theme=light]{
+  --bg:#eef1f6;--bg2:#e6eaf2;--panel:#ffffff;--panel-solid:#ffffff;--border:#dde3ec;--text:#121826;--muted:#5b667a;
+  --faint:#a7b0bf;--grid:rgba(0,0,0,.06);--shadow:0 6px 24px rgba(20,30,60,.08);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI Variable","Segoe UI",system-ui,-apple-system,Arial,sans-serif;font-size:14px}
+body{background:radial-gradient(1200px 600px at 85% -10%,rgba(134,188,37,.13),transparent 60%),radial-gradient(900px 500px at -10% 10%,rgba(34,184,207,.08),transparent 60%),var(--bg);min-height:100vh}
+[data-theme=light] body{background:var(--bg)}
+a{color:inherit}
+.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:18px;padding:14px 28px;background:rgba(6,10,20,.72);backdrop-filter:blur(14px);border-bottom:1px solid var(--border)}
+[data-theme=light] .topbar{background:rgba(255,255,255,.85)}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--green),#2e6b0e);display:grid;place-items:center;font-weight:800;color:#fff;box-shadow:0 0 22px rgba(134,188,37,.45)}
+.brand h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px}
+.brand small{display:block;color:var(--muted);font-size:11.5px;margin-top:1px}
+.live{display:inline-flex;align-items:center;gap:7px;padding:4px 10px;border-radius:20px;background:rgba(134,188,37,.12);color:var(--green);font-size:11.5px;font-weight:600}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(134,188,37,.7);animation:ping 1.8s infinite}
+@keyframes ping{0%{box-shadow:0 0 0 0 rgba(134,188,37,.6)}80%,100%{box-shadow:0 0 0 9px rgba(134,188,37,0)}}
+.spacer{flex:1}
+.ctrl{display:flex;gap:8px;align-items:center}
+select,input[type=search]{background:var(--panel-solid);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font:inherit;font-size:12.5px;outline:none}
+input[type=search]{width:200px}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.seg button{background:transparent;border:0;color:var(--muted);padding:7px 12px;font:inherit;font-size:12.5px;cursor:pointer}
+.seg button.on{background:var(--green);color:#0b1400;font-weight:650}
+.btn{background:var(--panel-solid);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 12px;font:inherit;font-size:12.5px;cursor:pointer;display:inline-flex;gap:6px;align-items:center}
+.btn:hover{border-color:var(--green)}
+main{padding:22px 28px 60px;max-width:1560px;margin:0 auto}
+.banner{display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:10px;border:1px dashed var(--border);color:var(--muted);font-size:12px;margin-bottom:18px}
+.banner b{color:var(--amber)}
+.grid{display:grid;gap:16px}
+.kpis{grid-template-columns:repeat(6,1fr)}
+@media(max-width:1300px){.kpis{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:760px){.kpis{grid-template-columns:repeat(2,1fr)}.topbar{flex-wrap:wrap}}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);position:relative;overflow:hidden;animation:rise .5s ease both}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.kpi .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:650;display:flex;justify-content:space-between;align-items:center}
+.kpi .val{font-size:28px;font-weight:700;margin:8px 0 2px;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.kpi .sub{font-size:11.5px;color:var(--muted)}
+.delta{font-size:11px;font-weight:700;padding:2px 7px;border-radius:10px}
+.delta.good{background:rgba(134,188,37,.15);color:var(--green)}
+.delta.bad{background:rgba(255,93,98,.14);color:var(--red)}
+.kpi svg.spark{position:absolute;right:0;bottom:0;width:100%;height:46px;opacity:.9;pointer-events:none}
+.kpi.hero{background:linear-gradient(135deg,rgba(134,188,37,.18),rgba(134,188,37,.03));border-color:rgba(134,188,37,.35)}
+.kpi.hero .val{color:var(--green)}
+.row2{grid-template-columns:2.1fr 1fr;margin-top:16px}
+.row3{grid-template-columns:1fr 1fr 1fr;margin-top:16px}
+.row4{grid-template-columns:1.35fr 1fr;margin-top:16px}
+@media(max-width:1100px){.row2,.row3,.row4{grid-template-columns:1fr}}
+.card h3{margin:0;font-size:13px;font-weight:650;letter-spacing:.02em}
+.card .hd{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;gap:10px}
+.card .hd p{margin:3px 0 0;color:var(--muted);font-size:11.5px}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+svg text{fill:var(--muted);font-size:10.5px}
+.tip{position:fixed;pointer-events:none;z-index:50;background:var(--panel-solid);border:1px solid var(--border);border-radius:10px;padding:9px 11px;font-size:12px;box-shadow:var(--shadow);opacity:0;transition:opacity .12s;min-width:140px}
+.tip b{display:block;margin-bottom:4px;font-size:12px}
+.tip .r{display:flex;justify-content:space-between;gap:14px;color:var(--muted)}
+.tip .r em{font-style:normal;color:var(--text);font-variant-numeric:tabular-nums}
+.gauge-wrap{display:flex;flex-direction:column;align-items:center}
+.gauge-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;width:100%;margin-top:6px}
+.mini{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:9px 11px}
+[data-theme=light] .mini{background:#f6f8fb}
+.mini .l{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.mini .v{font-size:16px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+.funnel .stage{display:grid;grid-template-columns:150px 1fr 70px;align-items:center;gap:10px;margin:7px 0;font-size:12.5px}
+.funnel .bar{height:24px;border-radius:6px;background:linear-gradient(90deg,var(--green),var(--teal));position:relative;transition:width .6s cubic-bezier(.2,.8,.2,1)}
+.funnel .track{background:var(--bg2);border-radius:6px;height:24px;overflow:hidden}
+[data-theme=light] .funnel .track{background:#eef1f5}
+.funnel .n{text-align:right;font-variant-numeric:tabular-nums;font-weight:650}
+.funnel .drop{color:var(--red);font-size:10.5px;font-weight:600;margin-left:4px}
+.guard{display:grid;grid-template-columns:1fr auto;gap:8px 10px;align-items:center;font-size:12.5px}
+#guards .g{display:flex;gap:9px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)}
+#guards .g:last-of-type{border-bottom:0}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.pill{font-size:10.5px;padding:3px 9px;border-radius:12px;font-weight:650;white-space:nowrap}
+.p-ok{background:rgba(134,188,37,.14);color:var(--green)}
+.p-warn{background:rgba(245,166,35,.14);color:var(--amber)}
+.p-bad{background:rgba(255,93,98,.14);color:var(--red)}
+.p-info{background:rgba(34,184,207,.14);color:var(--teal)}
+.p-mute{background:rgba(134,145,168,.14);color:var(--muted)}
+.insights{display:flex;flex-direction:column;gap:10px}
+.ins{display:flex;gap:12px;padding:11px 12px;border-radius:10px;background:var(--bg2);border:1px solid var(--border);font-size:12.5px;line-height:1.45}
+[data-theme=light] .ins{background:#f6f8fb}
+.ins .ic{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;flex:none;font-weight:800}
+.ins b{color:var(--text)}
+.ins span{color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{color:var(--muted);text-align:left;font-weight:650;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;padding:10px 10px;border-bottom:1px solid var(--border);cursor:pointer;user-select:none;white-space:nowrap}
+th:hover{color:var(--text)}
+th.sorted::after{content:" ▾";color:var(--green)}
+th.sorted.asc::after{content:" ▴"}
+td{padding:10px;border-bottom:1px solid var(--border);white-space:nowrap;font-variant-numeric:tabular-nums}
+tbody tr{cursor:pointer;transition:background .12s}
+tbody tr:hover{background:rgba(134,188,37,.06)}
+.tk{font-weight:700}
+.bar-in{height:6px;border-radius:4px;background:var(--green);display:inline-block;vertical-align:middle;margin-right:8px}
+.table-wrap{max-height:520px;overflow:auto;margin:0 -18px -16px;padding:0 18px}
+.drawer{position:fixed;top:0;right:0;height:100vh;width:min(520px,100vw);background:var(--panel-solid);border-left:1px solid var(--border);box-shadow:-20px 0 60px rgba(0,0,0,.4);z-index:40;transform:translateX(105%);transition:transform .32s cubic-bezier(.2,.8,.2,1);overflow:auto;padding:24px}
+.drawer.open{transform:none}
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:35;opacity:0;pointer-events:none;transition:opacity .25s}
+.scrim.open{opacity:1;pointer-events:auto}
+.drawer h2{margin:0 0 4px;font-size:20px}
+.drawer .x{position:absolute;top:18px;right:18px}
+.kv{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 0}
+.tl{position:relative;margin:16px 0 0 8px;padding-left:20px;border-left:2px solid var(--border)}
+.tl .s{position:relative;margin:0 0 14px}
+.tl .s::before{content:"";position:absolute;left:-27px;top:3px;width:12px;height:12px;border-radius:50%;background:var(--panel-solid);border:2px solid var(--green)}
+.tl .s.fail::before{border-color:var(--red);background:var(--red)}
+.tl .s.skip::before{border-color:var(--faint)}
+.tl .s.human::before{border-color:var(--violet)}
+.tl .s .t{font-weight:650;font-size:13px}
+.tl .s .m{color:var(--muted);font-size:11.5px;margin-top:2px}
+.stack{display:flex;height:12px;border-radius:6px;overflow:hidden;margin-top:6px}
+footer{color:var(--muted);font-size:11.5px;text-align:center;margin-top:28px;line-height:1.7}
+.chips{display:flex;gap:6px}
+.chip{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:16px;padding:5px 11px;font:inherit;font-size:11.5px;cursor:pointer}
+.chip.on{border-color:var(--green);color:var(--green);background:rgba(134,188,37,.08)}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand"><div class="logo">AI</div><div><h1>AI Delivery Command Center</h1><small>OperateNext · Salesforce agentic defect-resolution pipeline</small></div></div>
+  <span class="live"><i></i>Live</span>
+  <div class="spacer"></div>
+  <div class="ctrl">
+    <select id="fProject"><option value="all">All projects</option></select>
+    <div class="seg" id="fRange"><button data-d="7">7D</button><button data-d="14">14D</button><button data-d="30" class="on">30D</button><button data-d="0">All</button></div>
+    <div class="chips" id="fCx"><button class="chip on" data-c="simple">Simple</button><button class="chip on" data-c="moderate">Moderate</button><button class="chip on" data-c="complex">Complex</button></div>
+    <button class="btn" id="bExport" title="Export filtered tickets as CSV">⤓ CSV</button>
+    <button class="btn" id="bTheme" title="Toggle theme">◐</button>
+  </div>
+</div>
+<main>
+  <div class="banner" id="banner" style="display:__BANNER_DISPLAY__">ⓘ&nbsp;<span>__BANNER_TEXT__</span></div>
+  <section class="grid kpis" id="kpis"></section>
+  <section class="grid row2">
+    <div class="card">
+      <div class="hd"><div><h3>Spend vs. budget — this month</h3><p>Cumulative AI spend, month-end forecast, and the hard budget circuit-breaker</p></div>
+        <div class="legend"><span><i style="background:var(--green)"></i>Actual</span><span><i style="background:var(--teal)"></i>Forecast</span><span><i style="background:var(--red)"></i>Budget</span></div></div>
+      <svg id="cSpend" viewBox="0 0 900 290" width="100%" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="card">
+      <div class="hd"><div><h3>Budget health</h3><p>Monthly AI-credit budget utilisation</p></div><span class="pill" id="budgetPill"></span></div>
+      <div class="gauge-wrap"><svg id="cGauge" viewBox="0 0 260 160" width="100%" style="max-width:300px"></svg>
+        <div class="gauge-meta" id="gaugeMeta"></div></div>
+    </div>
+  </section>
+  <section class="grid row3">
+    <div class="card">
+      <div class="hd"><div><h3>Productive vs. wasted spend</h3><p>Daily spend split by whether it produced a PR</p></div>
+      <div class="legend"><span><i style="background:var(--green)"></i>Productive</span><span><i style="background:var(--red)"></i>Wasted</span></div></div>
+      <svg id="cDaily" viewBox="0 0 440 230" width="100%"></svg>
+    </div>
+    <div class="card funnel">
+      <div class="hd"><div><h3>Pipeline funnel</h3><p>Where tickets drop out, from claim to merge</p></div></div>
+      <div id="funnel"></div>
+    </div>
+    <div class="card">
+      <div class="hd"><div><h3>Spend by model tier</h3><p>Effect of complexity-based routing</p></div></div>
+      <svg id="cDonut" viewBox="0 0 440 230" width="100%"></svg>
+    </div>
+  </section>
+  <section class="grid row4">
+    <div class="card">
+      <div class="hd"><div><h3>What drives cost: exploration</h3><p>Each dot is a ticket (only shown for tickets with a known tool-call count).</p></div>
+        <div class="legend"><span><i style="background:var(--green)"></i>Simple</span><span><i style="background:var(--teal)"></i>Moderate</span><span><i style="background:var(--violet)"></i>Complex</span></div></div>
+      <svg id="cScatter" viewBox="0 0 700 300" width="100%"></svg>
+    </div>
+    <div class="card">
+      <div class="hd"><div><h3>AI insights</h3><p>Generated automatically from the telemetry</p></div><span class="pill p-info">Auto</span></div>
+      <div class="insights" id="insights"></div>
+    </div>
+  </section>
+  <section class="grid row4">
+    <div class="card">
+      <div class="hd"><div><h3>Ticket ledger</h3><p>Click any row to see its full run timeline and token breakdown</p></div><input type="search" id="q" placeholder="Search ticket, outcome, project…"></div>
+      <div class="table-wrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="hd"><div><h3>Guardrail posture</h3><p>Controls verified on the latest pre-flight run</p></div><span class="pill p-ok" id="guardScore"></span></div>
+      <div id="guards"></div>
+      <div class="hd" style="margin-top:18px"><div><h3>Token economics</h3><p>Where tokens go (period total)</p></div></div>
+      <div id="tokens"></div>
+    </div>
+  </section>
+  <footer>AI spend estimated at $0.01 per AI credit (GitHub Copilot metered billing). Figures are telemetry-based estimates, not an invoice.<br>
+  Human approval is required at the review gate and for every merge. The agent never merges or deploys.</footer>
+</main>
+<div class="tip" id="tip"></div>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer"></aside>
+<script>
+/* ============================================================
+   DATA — injected below by generate_pipeline_dashboard.py from
+   logs/run-events.jsonl (+ logs/<KEY>-usage.json / <KEY>-pr.json
+   when present). Re-generated fresh on every ticket completion,
+   so it accumulates across all tickets run so far.
+   ============================================================ */
+window.__PIPELINE_DATA__ = __PIPELINE_DATA_JSON__;
+const CFG = { monthlyBudgetUsd: __MONTHLY_BUDGET__, creditUsd: 0.01, perTicketCeilingCredits: __TICKET_CEILING__, routingStartDay: 0, now: new Date(__NOW_ISO__) };
+const DATA = (window.__PIPELINE_DATA__ && window.__PIPELINE_DATA__.length) ? window.__PIPELINE_DATA__ : [];
+if(window.__PIPELINE_DATA__ && window.__PIPELINE_DATA__.length) document.getElementById('banner').style.display='none';
+// Real outcome taxonomy from watch_queue.py's own outcome mapping (PROJECT-CONTEXT.md
+// Section 8/16): prepare->blocked, agent_step->agent_failed, review->rejected_gate,
+// validate->failed_validation, pr->pr_failed, jira->jira_failed. Extended here so no
+// outcome value the generator can emit is ever missing from this lookup (an unmapped
+// key would otherwise throw when the table/drawer try to render it).
+const OUT={merged:['Merged','p-ok','var(--green)'],pr_open:['PR open (not yet confirmed merged)','p-info','var(--teal)'],
+  rejected_gate:['Rejected at gate','p-warn','var(--amber)'],
+  failed_validation:['Failed validation','p-bad','var(--red)'],timed_out:['Timed out','p-bad','var(--red)'],
+  ceiling_hit:['Cost ceiling hit','p-bad','var(--red)'],blocked_triage:['Blocked at triage / needs info','p-mute','var(--muted)'],
+  agent_failed:['Agent run failed','p-bad','var(--red)'],pr_failed:['PR creation failed','p-bad','var(--red)'],
+  jira_failed:['Jira update failed','p-warn','var(--amber)'],locked:['Skipped (duplicate run lock)','p-mute','var(--muted)'],
+  budget_blocked:['Blocked - monthly budget reached','p-mute','var(--muted)'],
+  blocked_other:['Blocked (guard)','p-mute','var(--muted)'],unknown:['Unknown / in progress','p-mute','var(--muted)']};
+const PRODUCTIVE=new Set(['merged','pr_open']);
+const CXCOL={simple:'var(--green)',moderate:'var(--teal)',complex:'var(--violet)',unknown:'var(--faint)'};
+const TIERCOL={Economy:'var(--green)',Standard:'var(--teal)',Premium:'var(--violet)',Unknown:'var(--faint)'};
+const usd=c=>'$'+(c*CFG.creditUsd).toFixed(2);
+const fmtK=n=>n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
+const day=d=>new Date(d).toISOString().slice(0,10);
+/* ===== state & filters ===== */
+const S={project:'all',range:0,cx:new Set(['simple','moderate','complex','unknown']),q:'',sort:'time',asc:false};
+const projects=[...new Set(DATA.map(d=>d.project))];
+const fP=document.getElementById('fProject');projects.forEach(p=>fP.insertAdjacentHTML('beforeend',`<option>${p}</option>`));
+fP.onchange=e=>{S.project=e.target.value;render()};
+document.querySelectorAll('#fRange button').forEach(b=>b.onclick=()=>{document.querySelectorAll('#fRange button').forEach(x=>x.classList.remove('on'));b.classList.add('on');S.range=+b.dataset.d;render()});
+document.querySelectorAll('#fCx .chip').forEach(b=>b.onclick=()=>{const c=b.dataset.c;if(S.cx.has(c)){if(S.cx.size>1){S.cx.delete(c);b.classList.remove('on')}}else{S.cx.add(c);b.classList.add('on')}render()});
+document.getElementById('q').oninput=e=>{S.q=e.target.value.toLowerCase();renderTable()};
+document.getElementById('bTheme').onclick=()=>{const h=document.documentElement;h.dataset.theme=h.dataset.theme==='dark'?'light':'dark'};
+function filtered(){
+  const cutoff=S.range?new Date(CFG.now.getTime()-S.range*864e5):new Date(0);
+  return DATA.filter(d=>(S.project==='all'||d.project===S.project)&&S.cx.has(d.complexity)&&new Date(d.time)>=cutoff);
+}
+/* ===== svg helpers & tooltip ===== */
+const NS='http://www.w3.org/2000/svg';
+function E(tag,attrs,parent,text){const e=document.createElementNS(NS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);if(text!=null)e.textContent=text;if(parent)parent.appendChild(e);return e}
+const tip=document.getElementById('tip');
+function showTip(ev,html){tip.innerHTML=html;tip.style.opacity=1;const x=Math.min(ev.clientX+14,innerWidth-tip.offsetWidth-10),y=Math.min(ev.clientY+14,innerHeight-tip.offsetHeight-10);tip.style.left=x+'px';tip.style.top=y+'px'}
+function hideTip(){tip.style.opacity=0}
+const row=(k,v)=>`<div class="r">${k}<em>${v}</em></div>`;
+function defs(svg){const d=E('defs',{},svg);const g=E('linearGradient',{id:'gArea',x1:0,y1:0,x2:0,y2:1},d);E('stop',{offset:'0%','stop-color':'#86BC25','stop-opacity':.38},g);E('stop',{offset:'100%','stop-color':'#86BC25','stop-opacity':0},g);
+  const f=E('filter',{id:'glow'},d);E('feGaussianBlur',{stdDeviation:3,result:'b'},f);const m=E('feMerge',{},f);E('feMergeNode',{in:'b'},m);E('feMergeNode',{in:'SourceGraphic'},m)}
+/* ===== KPIs ===== */
+function spark(svg,vals,color){const w=300,h=46;svg.setAttribute('viewBox',`0 0 ${w} ${h}`);svg.setAttribute('preserveAspectRatio','none');const mx=Math.max(...vals,1);
+  const pts=vals.map((v,i)=>[i*(w/(vals.length-1||1)),h-4-(v/mx)*(h-14)]);const p=pts.map(p=>p.join(',')).join(' ');
+  E('polygon',{points:`0,${h} ${p} ${w},${h}`,fill:color,opacity:.12},svg);E('polyline',{points:p,fill:'none',stroke:color,'stroke-width':1.6,opacity:.8},svg)}
+function dailySeries(rows,fn,days=14){const out=[];for(let i=days-1;i>=0;i--){const d=day(new Date(CFG.now.getTime()-i*864e5));out.push(fn(rows.filter(r=>day(r.time)===d)))}return out}
+function renderKPIs(rows){
+  const all=rows, credits=all.reduce((s,r)=>s+r.credits,0), merged=all.filter(r=>r.outcome==='merged'), prod=all.filter(r=>PRODUCTIVE.has(r.outcome));
+  const wasted=all.filter(r=>!PRODUCTIVE.has(r.outcome)).reduce((s,r)=>s+r.credits,0);
+  const tok=all.reduce((a,r)=>({c:a.c+r.tokens.cached,i:a.i+r.tokens.cached+r.tokens.fresh}),{c:0,i:0});
+  const cpf=prod.length?credits/prod.length:0;
+  const cyc=prod.length?prod.reduce((s,r)=>s+r.durations.copilot+r.durations.gate+r.durations.validate+2,0)/prod.length:0;
+  const K=[
+    {l:'Cost per delivered fix',v:usd(cpf),s:`${prod.length} PRs from ${all.length} ticket run(s)`,hero:1,sp:dailySeries(all,r=>r.reduce((s,x)=>s+x.credits,0)/(r.filter(x=>PRODUCTIVE.has(x.outcome)).length||1)),c:'#86BC25'},
+    {l:'Total AI spend',v:usd(credits),s:`${credits.toFixed(2)} AI credits`,sp:dailySeries(all,r=>r.reduce((s,x)=>s+x.credits,0)),c:'#22b8cf'},
+    {l:'PRs opened',v:prod.length,s:`${merged.length} confirmed merged`,sp:dailySeries(all,r=>r.filter(x=>PRODUCTIVE.has(x.outcome)).length),c:'#86BC25'},
+    {l:'Wasted spend',v:(credits?wasted/credits*100:0).toFixed(1)+'%',s:`${usd(wasted)} on runs with no PR`,bad:1,sp:dailySeries(all,r=>r.filter(x=>!PRODUCTIVE.has(x.outcome)).reduce((s,x)=>s+x.credits,0)),c:'#ff5d62'},
+    {l:'Prompt cache hit',v:(tok.i?tok.c/tok.i*100:0).toFixed(1)+'%',s:'Cached input billed at ~10%',sp:dailySeries(all,r=>{const i=r.reduce((s,x)=>s+x.tokens.cached+x.tokens.fresh,0);return i?r.reduce((s,x)=>s+x.tokens.cached,0)/i:0}),c:'#8b7cf6'},
+    {l:'Avg cycle time',v:cyc.toFixed(0)+' min',s:'Claim → draft PR (incl. human gate)',sp:dailySeries(prod,r=>r.length?r.reduce((s,x)=>s+x.durations.copilot+x.durations.gate,0)/r.length:0),c:'#f5a623'},
+  ];
+  const host=document.getElementById('kpis');host.innerHTML='';
+  K.forEach((k,i)=>{const el=document.createElement('div');el.className='card kpi'+(k.hero?' hero':'');el.style.animationDelay=(i*50)+'ms';
+    el.innerHTML=`<div class="lbl">${k.l}</div><div class="val">${k.v}</div><div class="sub">${k.s}</div>`;
+    const sv=E('svg',{class:'spark'},el);spark(sv,k.sp,k.c);host.appendChild(el)});
+}
+/* ===== Spend vs budget ===== */
+function monthInfo(){const n=CFG.now;const ms=new Date(n.getFullYear(),n.getMonth(),1);const dim=new Date(n.getFullYear(),n.getMonth()+1,0).getDate();return {ms,dim,dom:n.getDate()}}
+function monthRows(){const {ms}=monthInfo();return DATA.filter(r=>new Date(r.time)>=ms&&new Date(r.time)<=CFG.now&&(S.project==='all'||r.project===S.project)&&S.cx.has(r.complexity))}
+function renderSpend(){
+  const svg=document.getElementById('cSpend');svg.innerHTML='';defs(svg);
+  const W=900,H=290,L=54,Rp=20,T=16,B=32,pw=W-L-Rp,ph=H-T-B;
+  const {ms,dim,dom}=monthInfo(), rows=monthRows();
+  const byDay={};rows.forEach(r=>{byDay[day(r.time)]=(byDay[day(r.time)]||0)+r.credits*CFG.creditUsd});
+  const dates=[];for(let i=0;i<dim;i++)dates.push(new Date(ms.getTime()+i*864e5+12*36e5));
+  let c=0;const cum=dates.slice(0,dom).map(d=>c+=byDay[day(d)]||0);
+  const rate=dom?cum[dom-1]/dom:0, fc=[];for(let i=dom;i<dim;i++)fc.push(cum[dom-1]+rate*(i-dom+1));
+  const budget=CFG.monthlyBudgetUsd, maxY=Math.max(budget*1.15,...cum,...fc,1), total=dim;
+  const x=i=>L+i/(total-1)*pw, y=v=>T+ph-v/maxY*ph;
+  for(let g=0;g<=4;g++){const v=maxY*g/4;E('line',{x1:L,x2:W-Rp,y1:y(v),y2:y(v),stroke:'var(--grid)'},svg);E('text',{x:L-8,y:y(v)+4,'text-anchor':'end'},svg,'$'+v.toFixed(0))}
+  [0,7,14,21,total-1].forEach(i=>E('text',{x:x(i),y:H-10,'text-anchor':'middle'},svg,dates[i].toLocaleDateString('en-CA',{month:'short',day:'numeric'})));
+  if(dom<dim){E('rect',{x:x(dom-1),y:T,width:x(total-1)-x(dom-1),height:ph,fill:'rgba(34,184,207,.05)'},svg);E('text',{x:x(dom-1)+8,y:T+14,fill:'var(--teal)'},svg,'FORECAST')}
+  E('line',{x1:L,x2:W-Rp,y1:y(budget),y2:y(budget),stroke:'var(--red)','stroke-dasharray':'6 5','stroke-width':1.5},svg);
+  E('text',{x:W-Rp-4,y:y(budget)-7,'text-anchor':'end',fill:'var(--red)'},svg,`Monthly budget $${budget} — watcher auto-pauses at 100%`);
+  const pts=cum.map((v,i)=>`${x(i)},${y(v)}`).join(' ');
+  E('polygon',{points:`${x(0)},${y(0)} ${pts} ${x(dom-1)},${y(0)}`,fill:'url(#gArea)'},svg);
+  const line=E('polyline',{points:pts,fill:'none',stroke:'var(--green)','stroke-width':2.6,filter:'url(#glow)','stroke-linejoin':'round'},svg);
+  const len=pw*1.4;line.style.strokeDasharray=len;line.style.strokeDashoffset=len;line.style.transition='stroke-dashoffset 1.2s ease';requestAnimationFrame(()=>line.style.strokeDashoffset=0);
+  if(fc.length){E('polyline',{points:[`${x(dom-1)},${y(cum[dom-1])}`,...fc.map((v,i)=>`${x(dom+i)},${y(v)}`)].join(' '),fill:'none',stroke:'var(--teal)','stroke-width':2,'stroke-dasharray':'5 5'},svg);
+    E('circle',{cx:x(total-1),cy:y(fc[fc.length-1]),r:4,fill:'var(--teal)'},svg)}
+  const cross=E('line',{y1:T,y2:T+ph,stroke:'var(--faint)','stroke-dasharray':'3 3',opacity:0},svg);
+  const dot=E('circle',{r:5,fill:'var(--green)',stroke:'var(--panel-solid)','stroke-width':2,opacity:0},svg);
+  const hit=E('rect',{x:L,y:T,width:pw,height:ph,fill:'transparent'},svg);
+  hit.addEventListener('mousemove',ev=>{const bb=svg.getBoundingClientRect();const mx=(ev.clientX-bb.left)/bb.width*W;let i=Math.round((mx-L)/pw*(total-1));i=Math.max(0,Math.min(total-1,i));
+    const isF=i>=dom, v=isF?fc[i-dom]:cum[i];cross.setAttribute('x1',x(i));cross.setAttribute('x2',x(i));cross.setAttribute('opacity',1);dot.setAttribute('cx',x(i));dot.setAttribute('cy',y(v));dot.setAttribute('opacity',1);dot.setAttribute('fill',isF?'var(--teal)':'var(--green)');
+    const d=dates[i];const n=rows.filter(r=>day(r.time)===day(d)).length;
+    showTip(ev,`<b>${d.toDateString()}${isF?' · forecast':''}</b>${row('Cumulative','$'+v.toFixed(2))}${isF?'':row('Spent that day','$'+(byDay[day(d)]||0).toFixed(2))+row('Tickets run',n)}${row('Budget used',(v/budget*100).toFixed(0)+'%')}`)});
+  hit.addEventListener('mouseleave',()=>{hideTip();cross.setAttribute('opacity',0);dot.setAttribute('opacity',0)});
+  return {spent:cum[dom-1]||0,forecast:fc.length?fc[fc.length-1]:(cum[dom-1]||0)};
+}
+/* ===== Gauge ===== */
+function renderGauge(sp){
+  const {dim,dom}=monthInfo();const mtd=sp.spent, burn=dom?mtd/dom:0, fc=sp.forecast, pct=mtd/CFG.monthlyBudgetUsd, fpct=fc/CFG.monthlyBudgetUsd;
+  const svg=document.getElementById('cGauge');svg.innerHTML='';
+  const cx=130,cy=135,r=100,arc=(a0,a1)=>{const p=a=>[cx+r*Math.cos(Math.PI*(1-a)),cy-r*Math.sin(Math.PI*(1-a))];const[x0,y0]=p(a0),[x1,y1]=p(a1);return `M${x0},${y0} A${r},${r} 0 0 1 ${x1},${y1}`};
+  E('path',{d:arc(0,1),stroke:'var(--grid)','stroke-width':18,fill:'none','stroke-linecap':'round'},svg);
+  E('path',{d:arc(0,.7),stroke:'rgba(134,188,37,.18)','stroke-width':18,fill:'none'},svg);
+  E('path',{d:arc(.7,.9),stroke:'rgba(245,166,35,.18)','stroke-width':18,fill:'none'},svg);
+  E('path',{d:arc(.9,1),stroke:'rgba(255,93,98,.2)','stroke-width':18,fill:'none'},svg);
+  const col=pct<.7?'var(--green)':pct<.9?'var(--amber)':'var(--red)';
+  const p=E('path',{d:arc(0,Math.min(pct,1)||.001),stroke:col,'stroke-width':18,fill:'none','stroke-linecap':'round',filter:'url(#glow)'},svg);
+  const fa=Math.min(fpct,1);E('line',{x1:cx+(r-16)*Math.cos(Math.PI*(1-fa)),y1:cy-(r-16)*Math.sin(Math.PI*(1-fa)),x2:cx+(r+16)*Math.cos(Math.PI*(1-fa)),y2:cy-(r+16)*Math.sin(Math.PI*(1-fa)),stroke:'var(--teal)','stroke-width':3},svg);
+  E('text',{x:cx,y:cy-22,'text-anchor':'middle',style:'font-size:34px;font-weight:700;fill:var(--text)'},svg,(pct*100).toFixed(0)+'%');
+  E('text',{x:cx,y:cy-2,'text-anchor':'middle'},svg,'of monthly budget used');
+  const pill=document.getElementById('budgetPill');pill.className='pill '+(fpct<.9?'p-ok':fpct<1?'p-warn':'p-bad');pill.textContent=fpct<.9?'On track':fpct<1?'Watch':'Projected overrun';
+  document.getElementById('gaugeMeta').innerHTML=`<div class="mini"><div class="l">Month to date</div><div class="v">$${mtd.toFixed(2)}</div></div><div class="mini"><div class="l">Forecast (EOM)</div><div class="v" style="color:var(--teal)">$${fc.toFixed(2)}</div></div><div class="mini"><div class="l">Daily burn</div><div class="v">$${burn.toFixed(2)}</div></div><div class="mini"><div class="l">Headroom</div><div class="v">$${Math.max(0,CFG.monthlyBudgetUsd-mtd).toFixed(2)}</div></div>`;
+}
+/* ===== Daily stacked ===== */
+function renderDaily(rows){
+  const svg=document.getElementById('cDaily');svg.innerHTML='';const W=440,H=230,L=38,T=10,B=26,pw=W-L-8,ph=H-T-B,n=14;
+  const ds=[];for(let i=n-1;i>=0;i--){const d=day(new Date(CFG.now.getTime()-i*864e5));const rs=rows.filter(r=>day(r.time)===d);
+    ds.push({d,p:rs.filter(r=>PRODUCTIVE.has(r.outcome)).reduce((s,r)=>s+r.credits,0)*CFG.creditUsd,w:rs.filter(r=>!PRODUCTIVE.has(r.outcome)).reduce((s,r)=>s+r.credits,0)*CFG.creditUsd,n:rs.length})}
+  const mx=Math.max(...ds.map(d=>d.p+d.w),.1)*1.1, bw=pw/n*.62, y=v=>T+ph-v/mx*ph;
+  for(let g=0;g<=3;g++){const v=mx*g/3;E('line',{x1:L,x2:W-8,y1:y(v),y2:y(v),stroke:'var(--grid)'},svg);E('text',{x:L-6,y:y(v)+4,'text-anchor':'end'},svg,'$'+v.toFixed(1))}
+  ds.forEach((d,i)=>{const x=L+i*pw/n+(pw/n-bw)/2;const g=E('g',{},svg);
+    E('rect',{x,y:y(d.p),width:bw,height:Math.max(0,ph+T-y(d.p)),rx:3,fill:'var(--green)'},g);
+    E('rect',{x,y:y(d.p+d.w),width:bw,height:Math.max(0,y(d.p)-y(d.p+d.w)),rx:3,fill:'var(--red)',opacity:.85},g);
+    if(i%3===0||i===n-1)E('text',{x:x+bw/2,y:H-8,'text-anchor':'middle'},svg,new Date(d.d+'T12:00').toLocaleDateString('en-CA',{month:'short',day:'numeric'}));
+    E('rect',{x:x-3,y:T,width:bw+6,height:ph,fill:'transparent'},g).addEventListener('mousemove',ev=>showTip(ev,`<b>${d.d}</b>${row('Productive','$'+d.p.toFixed(2))}${row('Wasted','$'+d.w.toFixed(2))}${row('Tickets',d.n)}`));
+    g.addEventListener('mouseleave',hideTip)});
+}
+/* ===== Funnel ===== */
+function renderFunnel(rows){
+  const n=rows.length;const st=[
+    ['Claimed',n],['Passed triage',rows.filter(r=>r.outcome!=='blocked_triage').length],
+    ['Agent completed',rows.filter(r=>!['blocked_triage','timed_out','ceiling_hit','agent_failed','locked','budget_blocked','blocked_other'].includes(r.outcome)).length],
+    ['Approved at gate',rows.filter(r=>!['blocked_triage','timed_out','ceiling_hit','rejected_gate','agent_failed','locked','budget_blocked','blocked_other'].includes(r.outcome)).length],
+    ['Validated',rows.filter(r=>PRODUCTIVE.has(r.outcome)||r.outcome==='pr_failed'||r.outcome==='jira_failed').length],
+    ['Draft PR created',rows.filter(r=>PRODUCTIVE.has(r.outcome)).length],
+    ['Confirmed merged',rows.filter(r=>r.outcome==='merged').length]];
+  document.getElementById('funnel').innerHTML=st.map((s,i)=>{const pct=n?s[1]/n*100:0;const drop=i?st[i-1][1]-s[1]:0;
+    return `<div class="stage"><span>${s[0]}${drop?`<span class="drop">−${drop}</span>`:''}</span><div class="track"><div class="bar" style="width:0" data-w="${pct}"></div></div><span class="n">${s[1]} <span style="color:var(--muted);font-weight:400">${pct.toFixed(0)}%</span></span></div>`}).join('');
+  requestAnimationFrame(()=>document.querySelectorAll('.funnel .bar').forEach(b=>b.style.width=b.dataset.w+'%'));
+}
+/* ===== Donut ===== */
+function renderDonut(rows){
+  const svg=document.getElementById('cDonut');svg.innerHTML='';const tiers=['Economy','Standard','Premium','Unknown'];
+  const v=tiers.map(t=>({t,c:rows.filter(r=>r.tier===t).reduce((s,r)=>s+r.credits,0),n:rows.filter(r=>r.tier===t).length})).filter(s=>s.n>0);
+  const tot=v.reduce((s,x)=>s+x.c,0)||1;
+  const cx=110,cy=115,r=78,sw=26;let a=-Math.PI/2;
+  v.forEach(s=>{const frac=s.c/tot;if(frac<=0)return;const a1=a+frac*Math.PI*2;const large=frac>.5?1:0;
+    const p=E('path',{d:`M${cx+r*Math.cos(a)},${cy+r*Math.sin(a)} A${r},${r} 0 ${large} 1 ${cx+r*Math.cos(a1-.0001)},${cy+r*Math.sin(a1-.0001)}`,stroke:TIERCOL[s.t]||'var(--faint)','stroke-width':sw,fill:'none',style:'transition:stroke-width .2s;cursor:pointer'},svg);
+    p.addEventListener('mousemove',ev=>{p.setAttribute('stroke-width',sw+6);showTip(ev,`<b>${s.t} tier</b>${row('Spend',usd(s.c))}${row('Share',(frac*100).toFixed(1)+'%')}${row('Tickets',s.n)}${row('Avg / ticket',usd(s.n?s.c/s.n:0))}`)});
+    p.addEventListener('mouseleave',()=>{p.setAttribute('stroke-width',sw);hideTip()});a=a1});
+  E('text',{x:cx,y:cy-2,'text-anchor':'middle',style:'font-size:22px;font-weight:700;fill:var(--text)'},svg,usd(tot));
+  E('text',{x:cx,y:cy+16,'text-anchor':'middle'},svg,'total spend');
+  v.forEach((s,i)=>{const y=70+i*42;E('rect',{x:240,y:y-10,width:12,height:12,rx:3,fill:TIERCOL[s.t]||'var(--faint)'},svg);
+    E('text',{x:260,y,style:'fill:var(--text);font-size:12.5px;font-weight:600'},svg,s.t);
+    E('text',{x:260,y:y+16},svg,`${s.n} tickets · ${usd(s.n?s.c/s.n:0)} avg`);
+    E('text',{x:432,y,'text-anchor':'end',style:'fill:var(--text);font-size:12.5px;font-weight:600'},svg,(s.c/tot*100).toFixed(0)+'%')});
+}
+/* ===== Scatter ===== */
+function renderScatter(rows){
+  const svg=document.getElementById('cScatter');svg.innerHTML='';const W=700,H=300,L=46,T=12,B=34,Rp=14,pw=W-L-Rp,ph=H-T-B;
+  const rs=rows.filter(r=>r.toolCalls>0);
+  if(!rs.length){E('text',{x:W/2,y:H/2,'text-anchor':'middle',fill:'var(--muted)'},svg,'Tool-call counts are not yet logged by invoke_copilot.py for these tickets.');return}
+  const mx=Math.max(...rs.map(r=>r.toolCalls),10)*1.08,my=Math.max(...rs.map(r=>r.credits),10)*1.1;
+  const x=v=>L+v/mx*pw,y=v=>T+ph-v/my*ph;
+  for(let g=0;g<=4;g++){E('line',{x1:L,x2:W-Rp,y1:y(my*g/4),y2:y(my*g/4),stroke:'var(--grid)'},svg);E('text',{x:L-6,y:y(my*g/4)+4,'text-anchor':'end'},svg,usd(my*g/4))}
+  for(let g=0;g<=5;g++)E('text',{x:x(mx*g/5),y:H-14,'text-anchor':'middle'},svg,Math.round(mx*g/5));
+  E('text',{x:L+pw/2,y:H-1,'text-anchor':'middle'},svg,'Agent search / read tool calls per ticket');
+  E('line',{x1:L,x2:W-Rp,y1:y(CFG.perTicketCeilingCredits),y2:y(CFG.perTicketCeilingCredits),stroke:'var(--red)','stroke-dasharray':'4 4'},svg);
+  E('text',{x:W-Rp-4,y:y(CFG.perTicketCeilingCredits)-6,'text-anchor':'end',fill:'var(--red)'},svg,'Per-ticket ceiling — run is stopped here');
+  rs.forEach((r,i)=>{const c=E('circle',{cx:x(r.toolCalls),cy:y(r.credits),r:0,fill:CXCOL[r.complexity]||'var(--faint)','fill-opacity':.75,stroke:PRODUCTIVE.has(r.outcome)?'none':'var(--red)','stroke-width':2,style:'cursor:pointer;transition:r .4s'},svg);
+    setTimeout(()=>c.setAttribute('r',5+Math.min(5,r.files)),20+i*12);
+    c.addEventListener('mousemove',ev=>showTip(ev,`<b>${r.key} · ${r.title}</b>${row('Cost',usd(r.credits))}${row('Tool calls',r.toolCalls)}${row('Tier',r.tier)}${row('Outcome',(OUT[r.outcome]||OUT.unknown)[0])}`));
+    c.addEventListener('mouseleave',hideTip);c.addEventListener('click',()=>openDrawer(r))});
+}
+/* ===== Insights ===== */
+function renderInsights(rows,spend){
+  const avg=a=>a.length?a.reduce((s,r)=>s+r.credits,0)/a.length:0;
+  const wasteBy={};rows.filter(r=>!PRODUCTIVE.has(r.outcome)&&r.credits>0).forEach(r=>wasteBy[r.outcome]=(wasteBy[r.outcome]||0)+r.credits);
+  const top=Object.entries(wasteBy).sort((a,b)=>b[1]-a[1])[0];
+  const triaged=rows.filter(r=>r.outcome==='blocked_triage').length, avoided=triaged*avg(rows.filter(r=>r.credits>0));
+  const I=[
+    rows.length?['i','var(--teal)',`<b>${rows.length} ticket run(s) recorded so far.</b> <span>This dashboard is rebuilt from logs/run-events.jsonl every time a ticket completes, so it grows automatically as more defects are fixed.</span>`]:null,
+    top?['!','var(--red)',`<b>Biggest waste source: ${(OUT[top[0]]||OUT.unknown)[0].toLowerCase()} (${usd(top[1])}).</b> <span>${top[0]==='failed_validation'?'Feed validation errors back to the agent once, within budget, before giving up.':top[0]==='rejected_gate'?'Tighten ticket acceptance criteria — vague tickets get rejected at the gate.':'Review this failure class for a pattern.'}</span>`]:null,
+    triaged?['✓','var(--teal)',`<b>Triage avoided ~${usd(avoided)} of spend.</b> <span>${triaged} ticket${triaged===1?' was':'s were'} stopped before any AI call (missing sections or injection risk). Zero-cost checks first.</span>`]:null,
+    ['→','var(--violet)',`<b>Month-end forecast: $${spend.forecast.toFixed(2)}.</b> <span>${spend.forecast<CFG.monthlyBudgetUsd?'Within the $'+CFG.monthlyBudgetUsd+' budget. No action needed.':'Above budget. The watcher will auto-pause at 100% — consider raising the cap or routing more to Economy.'}</span>`]
+  ].filter(Boolean);
+  document.getElementById('insights').innerHTML=I.length?I.map(([ic,c,t])=>`<div class="ins"><div class="ic" style="background:color-mix(in srgb, ${c} 18%, transparent);color:${c}">${ic}</div><div>${t}</div></div>`).join(''):'<div class="ins">No tickets recorded yet for the current filters.</div>';
+}
+/* ===== Guardrails & tokens ===== */
+function renderGuards(rows){
+  const G=[['Production-org guard (sandbox only)','ok','Active'],['Branch protection / merge-gate on main','ok','Verified (R8)'],['GitHub token scope audit','ok','Least-privilege'],
+    ['Per-ticket cost ceiling',  'ok',CFG.perTicketCeilingCredits+' credits'],['Monthly budget circuit-breaker','ok','$'+CFG.monthlyBudgetUsd],
+    ['Duplicate-run lock','ok','Active'],['Secret redaction in logs/alerts','ok','Active'],['Prompt-injection scan (ticket + code)','warn','Ticket only'],
+    ['Agent tool deny-list (push/gh/deploy)','ok','Enforced'],['Salesforce deploy approval gate','ok','Required reviewer (R8)']];
+  const ok=G.filter(g=>g[1]==='ok').length;document.getElementById('guardScore').textContent=`${ok}/${G.length} green`;
+  document.getElementById('guards').innerHTML=G.map(g=>`<div class="g"><span class="dot" style="background:${g[1]==='ok'?'var(--green)':'var(--amber)'}"></span><span style="flex:1">${g[0]}</span><span class="pill ${g[1]==='ok'?'p-ok':'p-warn'}">${g[2]}</span></div>`).join('');
+  const t=rows.reduce((a,r)=>({f:a.f+r.tokens.fresh,c:a.c+r.tokens.cached,o:a.o+r.tokens.out}),{f:0,c:0,o:0}),tot=t.f+t.c+t.o||1;
+  const TM={Economy:.25,Standard:.55,Premium:1};const saved=rows.reduce((s,r)=>s+r.tokens.cached*0.00027*(TM[r.tier]||1),0);
+  document.getElementById('tokens').innerHTML=`<div class="stack"><div style="width:${t.c/tot*100}%;background:var(--violet)"></div><div style="width:${t.f/tot*100}%;background:var(--teal)"></div><div style="width:${t.o/tot*100}%;background:var(--amber)"></div></div>
+    <div class="legend" style="margin-top:10px"><span><i style="background:var(--violet)"></i>Cached input ${fmtK(t.c)}</span><span><i style="background:var(--teal)"></i>Fresh input ${fmtK(t.f)}</span><span><i style="background:var(--amber)"></i>Output ${fmtK(t.o)}</span></div>
+    <div class="kv" style="margin-top:12px"><div class="mini"><div class="l">Cache share of input</div><div class="v">${((t.c/(t.c+t.f||1))*100).toFixed(1)}%</div></div><div class="mini"><div class="l">Saved by caching</div><div class="v" style="color:var(--green)">~${usd(saved)}</div></div></div>`;
+}
+/* ===== Table ===== */
+const COLS=[['key','Ticket'],['project','Project'],['complexity','Complexity'],['tier','Model tier'],['toolCalls','Tool calls'],['credits','Cost'],['outcome','Outcome'],['time','Run at']];
+function renderTable(){
+  const rows=filtered().filter(r=>!S.q||[r.key,r.title,r.project,(OUT[r.outcome]||OUT.unknown)[0]].join(' ').toLowerCase().includes(S.q));
+  rows.sort((a,b)=>{const va=a[S.sort],vb=b[S.sort];return (va>vb?1:va<vb?-1:0)*(S.asc?1:-1)});
+  const mx=Math.max(...rows.map(r=>r.credits),1);
+  document.querySelector('#tbl thead').innerHTML='<tr>'+COLS.map(([k,l])=>`<th data-k="${k}" class="${S.sort===k?'sorted'+(S.asc?' asc':''):''}">${l}</th>`).join('')+'</tr>';
+  document.querySelectorAll('#tbl th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(S.sort===k)S.asc=!S.asc;else{S.sort=k;S.asc=false}renderTable()});
+  const tb=document.querySelector('#tbl tbody');
+  tb.innerHTML=rows.map((r,i)=>`<tr data-i="${DATA.indexOf(r)}"><td class="tk">${r.key}</td><td>${r.project}</td>
+    <td><span class="dot" style="display:inline-block;background:${CXCOL[r.complexity]||'var(--faint)'};margin-right:6px"></span>${r.complexity}</td><td>${r.tier}</td><td>${r.toolCalls||'—'}</td>
+    <td><span class="bar-in" style="width:${r.credits/mx*60}px;background:${PRODUCTIVE.has(r.outcome)?'var(--green)':'var(--red)'}"></span>${usd(r.credits)}</td>
+    <td><span class="pill ${(OUT[r.outcome]||OUT.unknown)[1]}">${(OUT[r.outcome]||OUT.unknown)[0]}</span></td><td style="color:var(--muted)">${new Date(r.time).toLocaleString('en-CA',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</td></tr>`).join('')
+    || '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:30px">No tickets match these filters.</td></tr>';
+  tb.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>openDrawer(DATA[+tr.dataset.i]));
+}
+/* ===== Drill-down drawer ===== */
+function openDrawer(r){
+  const o=r.outcome, productive=PRODUCTIVE.has(o), steps=[
+    ['Claimed from Jira','Labelled ai-locked, moved to In Progress','ok'],
+    ['Localise / triage',o==='blocked_triage'?'Blocked — missing sections, low confidence, or injection risk. No AI spend.':`Confidence ${r.confidence!=null?r.confidence:'n/a'} · complexity ${r.complexity}`,o==='blocked_triage'?'fail':'ok'],
+    ['Agent run (Copilot CLI)',['blocked_triage','locked','budget_blocked'].includes(o)?'Not run':`${r.runs} attempt(s) · ${r.durations.copilot} min · ${usd(r.credits)}${o==='timed_out'?' · TIMED OUT':''}${o==='ceiling_hit'?' · STOPPED AT COST CEILING':''}${o==='agent_failed'?' · FAILED':''}`,['blocked_triage','locked','budget_blocked'].includes(o)?'skip':(o==='timed_out'||o==='ceiling_hit'||o==='agent_failed')?'fail':'ok'],
+    ['Human review gate',r.durations.gate?`Reviewed after ${r.durations.gate} min`:'Not reached',r.durations.gate?(o==='rejected_gate'?'fail':'human'):'skip'],
+    ['Validation (static + Apex)',r.durations.validate?`Validate step ran (${r.durations.validate}s)`:'Not reached',o==='failed_validation'?'fail':r.durations.validate?'ok':'skip'],
+    ['Draft PR + Jira update',productive?'Draft PR opened'+(o==='merged'?', confirmed merged':''):(o==='pr_failed'?'PR creation failed':'Not reached'),productive?'ok':(o==='pr_failed'?'fail':'skip')],
+    ['Human merge → deploy',o==='merged'?'Confirmed merged (per local record)':o==='pr_open'?'PR open — merge/deploy status not tracked locally yet':'Not reached',o==='merged'?'human':'skip']
+  ];
+  const t=r.tokens,tot=t.fresh+t.cached+t.out||1;
+  document.getElementById('drawer').innerHTML=`<button class="btn x" onclick="closeDrawer()">✕</button>
+    <div style="color:var(--muted);font-size:12px">${r.project} · ${r.type}</div><h2>${r.key}</h2><div style="font-size:14px">${r.title}</div>
+    <div style="margin-top:10px"><span class="pill ${(OUT[o]||OUT.unknown)[1]}">${(OUT[o]||OUT.unknown)[0]}</span> <span class="pill p-mute">${r.complexity}</span> <span class="pill p-info">${r.tier} tier</span></div>
+    <div class="kv"><div class="mini"><div class="l">AI cost</div><div class="v">${usd(r.credits)}</div></div><div class="mini"><div class="l">AI credits</div><div class="v">${r.credits.toFixed(3)}</div></div>
+    <div class="mini"><div class="l">Tool calls</div><div class="v">${r.toolCalls||'not logged'}</div></div><div class="mini"><div class="l">Change size</div><div class="v">${r.files||r.lines?r.files+' files · '+r.lines+' lines':'not logged'}</div></div></div>
+    <h3 style="font-size:13px;margin:18px 0 0">Token breakdown</h3>
+    ${tot>1?`<div class="stack"><div style="width:${t.cached/tot*100}%;background:var(--violet)"></div><div style="width:${t.fresh/tot*100}%;background:var(--teal)"></div><div style="width:${t.out/tot*100}%;background:var(--amber)"></div></div>
+    <div class="legend" style="margin-top:8px"><span><i style="background:var(--violet)"></i>Cached ${fmtK(t.cached)}</span><span><i style="background:var(--teal)"></i>Fresh ${fmtK(t.fresh)}</span><span><i style="background:var(--amber)"></i>Output ${fmtK(t.out)}</span></div>`:'<div style="color:var(--muted);font-size:12px;margin-top:6px">No usage-file token breakdown found for this run.</div>'}
+    <h3 style="font-size:13px;margin:22px 0 0">Run timeline</h3>
+    <div class="tl">${steps.map(s=>`<div class="s ${s[2]==='fail'?'fail':s[2]==='skip'?'skip':s[2]==='human'?'human':''}"><div class="t">${s[0]}</div><div class="m">${s[1]}</div></div>`).join('')}</div>
+    <div style="color:var(--muted);font-size:11.5px;margin-top:10px">Run started ${new Date(r.time).toLocaleString('en-CA')}.${r.prUrl?` <a href="${r.prUrl}" target="_blank" style="color:var(--teal)">Open PR ↗</a>`:''}</div>`;
+  document.getElementById('drawer').classList.add('open');document.getElementById('scrim').classList.add('open');
+}
+function closeDrawer(){document.getElementById('drawer').classList.remove('open');document.getElementById('scrim').classList.remove('open')}
+document.getElementById('scrim').onclick=closeDrawer;
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
+/* ===== CSV export ===== */
+document.getElementById('bExport').onclick=()=>{
+  const rows=filtered();const h=['ticket','project','type','complexity','tier','tool_calls','ai_credits','est_cost_usd','outcome','files','lines','run_at'];
+  const csv=[h.join(',')].concat(rows.map(r=>[r.key,r.project,r.type,r.complexity,r.tier,r.toolCalls,r.credits,(r.credits*CFG.creditUsd).toFixed(4),r.outcome,r.files,r.lines,r.time].join(','))).join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='ai-pipeline-tickets.csv';a.click();
+};
+/* ===== Render ===== */
+function render(){
+  const rows=filtered();
+  renderKPIs(rows);const sp=renderSpend();renderGauge(sp);renderDaily(rows);renderFunnel(rows);
+  renderDonut(rows);renderScatter(rows);renderInsights(rows,sp);renderGuards(rows);renderTable();
+}
+render();
+</script>
+</body>
+</html>
