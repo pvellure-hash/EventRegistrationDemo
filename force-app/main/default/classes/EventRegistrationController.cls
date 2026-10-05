@@ -77,8 +77,10 @@ public with sharing class EventRegistrationController {
         }
 
         if (!errors.isEmpty()) {
-            throw new AuraHandledException(String.join(errors, ' '));
-        }
+			AuraHandledException ex = new AuraHandledException(String.join(errors, ' '));
+			ex.setMessage(String.join(errors, ' '));
+			throw ex;
+		}
     }
 
     private static Boolean isValidEmail(String email) {
