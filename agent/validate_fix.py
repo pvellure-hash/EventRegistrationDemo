@@ -1,5 +1,5 @@
 """Step 7: Validate the agent's fix before anything is pushed.
-Static checks + Apex tests in the dev org (check-only deploy, rolled back).
+Static checks + Apex tests in the dev org (validate-only, rolled back).
 Exit code 0 = all checks passed, 1 = blocked.
 Usage: python validate_fix.py CLAUDE-11"""
 import os
@@ -8,6 +8,7 @@ import sys
 import json
 import shutil
 import subprocess
+
 import jira_client as jc
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -64,7 +65,6 @@ def warn(name, detail=""):
 
 
 # ---------------- Apex tests ----------------
-
 def find_test_classes(files):
     """Test classes to run: changed *Test.cls files, plus <Class>Test for changed classes."""
     tests = set()
@@ -95,12 +95,26 @@ def run_apex_tests(key, files):
         check("Apex tests in org", False, "no test class found for changed Apex")
         return
 
-    print(f"  ....  Running Apex tests in '{SF_TARGET_ORG}' (check-only, rolled back): "
+    print(f"  ....  Running Apex tests in '{SF_TARGET_ORG}' (validate-only, rolled back): "
           f"{', '.join(tests)}")
-    cmd = [sf, "project", "deploy", "start",
+
+    # Issue S9 fix (Oct 2026): `deploy start --dry-run --test-level
+    # RunSpecifiedTests` has two confirmed upstream Salesforce CLI bugs -
+    # tests are sometimes silently not read (forcedotcom/cli#2117) and the
+    # run can return a bare "Fatal Error" with 0 tests executed
+    # (forcedotcom/cli#2648). Reproduced locally on CLAUDE-15: a direct
+    # `sf apex run test` against the same 10 tests passed cleanly twice,
+    # while `deploy start --dry-run` failed both times with
+    # numberTestsTotal=0 and a 0% coverage error, even though nothing in
+    # the code or test changed between runs. `project deploy validate` is
+    # the purpose-built validate-only command (confirmed by a Salesforce
+    # CLI maintainer as the right tool when you need reliable test
+    # execution without deploying) and does not share that code path.
+    # Note: `deploy validate` has no --dry-run flag - it is inherently
+    # validate-only, so that flag is simply omitted here.
+    cmd = [sf, "project", "deploy", "validate",
            "--source-dir", "force-app",
            "--target-org", SF_TARGET_ORG,
-           "--dry-run",
            "--test-level", "RunSpecifiedTests",
            "--wait", str(APEX_TIMEOUT_MIN),
            "--json"]
@@ -160,12 +174,12 @@ def run_apex_tests(key, files):
 
 
 # ---------------- Main ----------------
-
 def main():
     if len(sys.argv) < 2:
         sys.exit("Usage: python validate_fix.py <TICKET-KEY>")
     key = sys.argv[1].strip().upper()
     os.makedirs(os.path.join(REPO_ROOT, "logs"), exist_ok=True)
+
     print("=" * 60)
     print(f"AGENT VALIDATION | {key} | base: {BASE}")
     print("=" * 60)
@@ -178,6 +192,7 @@ def main():
 
     commits = [c for c in git("log", "--format=%s", f"{BASE}..HEAD").splitlines() if c]
     check("Has at least one commit", len(commits) > 0, f"{len(commits)} commit(s)")
+
     bad = [c for c in commits
            if f"({key})" not in c and not c.lower().startswith("merge")]
     check("Commit messages reference ticket", not bad, "; ".join(bad))
@@ -231,6 +246,7 @@ def main():
               encoding="utf-8") as f:
         json.dump({"ticket": key, "branch": branch, "passed": not failed,
                    "results": results}, f, indent=2)
+
     jc.audit("validate", key, f"{len(results) - len(failed)}/{len(results)} passed",
              "ok" if not failed else "failed")
 
