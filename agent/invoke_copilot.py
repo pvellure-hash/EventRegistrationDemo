@@ -1,7 +1,7 @@
 """Step 6.5: Run GitHub Copilot CLI headlessly to implement the fix.
 
 Reads docs/ai-reports/<KEY>-prompt.md (written by prepare_fix.py) and feeds
-it to `copilot -p ...` non-interactively. Respects AGENT_ENABLED and
+it to `copilot` non-interactively via stdin. Respects AGENT_ENABLED and
 AGENT_DRY_RUN like every other step.
 
 PHASE 0 additions (Blueprint v4):
@@ -15,6 +15,16 @@ PHASE 0 additions (Blueprint v4):
     - single-run overshoot of the ceiling is flagged and alerted
     - CLI log is redacted before it is written to disk
   The lock is always released (finally), even on crash or timeout.
+
+PHASE 0 FIX (Issue C9, Oct 2026): the prompt used to be passed as a `-p`
+command-line argument. On Windows, `copilot` resolves to an npm .cmd shim,
+which is always launched through cmd.exe - and cmd.exe caps the whole
+command line at 8,191 characters. Prompts built from a code-aware context
+pack routinely exceed that (CLAUDE-15 was 14,272 chars), so the CLI was
+failing before it even started ("The command line is too long."). The
+prompt is now piped via stdin instead, which has no such limit. `-p` must
+stay OUT of cmd for this to work: Copilot CLI ignores piped stdin if a
+-p/--prompt argument is also present.
 
 ONE-TIME SETUP (already done per machine/repo): run `copilot` once from the
 repo root and accept "trust this folder" with "remember".
@@ -137,7 +147,9 @@ def main():
     key = sys.argv[1].strip().upper()
     if not KEY_PATTERN.match(key):
         sys.exit(f"STOP: '{key}' is not a valid {jc.PROJECT} ticket key.")
+
     events.current_run_id(key)
+
     global CLI_MODEL
     routed = routing.read_routing(key)
     if routed and routed.get("model"):
@@ -178,14 +190,17 @@ def main():
         print(f"  budget : {why}")
         if not ok:
             stop(key, "budget", "budget_blocked", why)
+
         ok, why = guards.check_ticket_ceiling(key)
         print(f"  ceiling: {why}")
         if not ok:
             stop(key, "ceiling", "ceiling_hit", why)
+
         [(_, ok, why)] = security_checks.check_salesforce_org()
         print(f"  org    : {why}")
         if not ok:
             stop(key, "prod_org_guard", "blocked", why)
+
         ok, why = tool_allowlist.check()
         print(f"  mcp    : {why}")
         if not ok:
@@ -193,7 +208,11 @@ def main():
 
         with open(prompt_path, encoding="utf-8") as f:
             prompt_text = f.read()
-        cmd = [cli, "-p", prompt_text, "-s", "--no-ask-user",
+
+        # Issue C9 fix: prompt goes in via stdin (no size limit), NOT as a
+        # -p command-line argument (capped at 8,191 chars by cmd.exe on
+        # Windows, since the npm `copilot` shim always runs through cmd.exe).
+        cmd = [cli, "-s", "--no-ask-user",
                "--allow-tool", ALLOW_TOOLS, "--deny-tool", DENY_TOOLS]
         if CLI_MODEL:
             cmd += ["--model", CLI_MODEL]
@@ -210,6 +229,7 @@ def main():
         try:
             r = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", env=cli_env,
+                               input=prompt_text,
                                timeout=CLI_TIMEOUT_MIN * 60)
         except subprocess.TimeoutExpired as e:
             out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
@@ -220,7 +240,7 @@ def main():
 
         log_path = os.path.join(events.log_dir(), f"{key}-copilot-cli.log")
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write(f"CMD: copilot -p <{len(prompt_text)} char prompt> -s --no-ask-user "
+            f.write(f"CMD: copilot (prompt via stdin, {len(prompt_text)} chars) -s --no-ask-user "
                     f"--allow-tool {ALLOW_TOOLS} --deny-tool {DENY_TOOLS}\n\n"
                     f"STDOUT:\n{redact.redact(r.stdout)}\n\nSTDERR:\n{redact.redact(r.stderr)}\n")
 
