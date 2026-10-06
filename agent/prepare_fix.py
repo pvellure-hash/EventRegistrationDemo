@@ -32,6 +32,18 @@ G11 (v7): a NEW branch is always cut from the latest origin/main via
   without changing anything if local main has diverged). Each ticket's branch
   is independent - an earlier ticket's unmerged PR is never carried in.
   A RESUMED branch (same ticket retried) is checked out as-is.
+STEP 2 (v7) - overlap guard, still BEFORE any git change or AI call ($0):
+  the files localisation picked (plus their dependents) are compared with the
+  files every OPEN ticket PR already changes (git_sync.overlapping_open_prs).
+  If any overlap, the ticket is labelled ai-waiting (ai-ready/ai-locked removed),
+  one Jira comment names the PR(s), logs/waiting.json records them, and this
+  script exits with code 3 (watch_queue treats 3 as "waiting", not a failure).
+  update_jira.release_waiting() puts it back to ai-ready once those PRs are
+  merged or closed, so it is redone from a main that already has that change.
+  The ticket's own branch is excluded (a retry never waits on itself).
+  GitHub errors fail OPEN (warning only): GitHub's "require branches to be up
+  to date" rule still stops a stale PR from merging.
+  .env: OVERLAP_GUARD_ENABLED=true (set false to switch the guard off)
 Usage:  python prepare_fix.py            (finds the claimed ticket)
         python prepare_fix.py CLAUDE-11  (specific ticket)
 """
@@ -49,6 +61,7 @@ import injection_scan
 import escalation
 import routing
 import git_sync
+import pr_tracker
 try:
     import events
 except Exception:  # Phase 0 event store is optional for this step to run
@@ -59,6 +72,8 @@ BASE_BRANCH = os.getenv("GITHUB_BASE_BRANCH", "main").strip()
 REPORT_DIR = os.path.join(REPO_ROOT, "docs", "ai-reports")
 KEY_PATTERN = re.compile(rf"^{re.escape(jc.PROJECT)}-\d+$")
 CONTEXT_PACK_MAX_TOKENS = int(os.getenv("CONTEXT_PACK_MAX_TOKENS", "12000"))
+OVERLAP_GUARD_ENABLED = os.getenv("OVERLAP_GUARD_ENABLED", "true").strip().lower() == "true"
+EXIT_WAITING = 3
 
 
 class GitError(Exception):
@@ -135,12 +150,30 @@ def emit(key, step, status, **fields):
         events.emit_event(key, step, status, **fields)
 
 
-def run_localisation(key, summary, description):
+def check_overlap(key, files, branch):
+    """STEP 2: open ticket PRs that already change any of `files`.
+    Returns a list of {number, title, head, url, files}. Fails open ([])."""
+    if not OVERLAP_GUARD_ENABLED or not files:
+        return []
+    try:
+        hits = git_sync.overlapping_open_prs(files, exclude_head=branch, base=BASE_BRANCH)
+    except Exception as e:
+        print(f"  [overlap] WARNING (fail-open): could not check open PRs: {e}")
+        return []
+    # only ticket PRs count (tooling PRs have no ticket key)
+    hits = [h for h in hits if pr_tracker.KEY_RE.search(h["head"].upper())]
+    if not hits:
+        print(f"  [overlap] OK  no open ticket PR touches these {len(files)} file(s)")
+    return hits
+
+
+def run_localisation(key, summary, description, branch=None):
     """Returns (decision, pack_md, model_tier, model_name, confidence,
     complexity) where decision is
-    one of 'proceed', 'ask_for_info', 'blocked_injection'. On the non-proceed
-    paths, pack_md/model_* are None and the caller must stop with zero
-    further AI spend."""
+    one of 'proceed', 'ask_for_info', 'blocked_injection', 'waiting'. On the
+    non-proceed paths, model_* are None and the caller must stop with zero
+    further AI spend. For 'waiting' the second item is the list of
+    overlapping PRs (from check_overlap) instead of a context pack."""
     ticket_text = f"{summary}\n{description or ''}"
     idx = code_index.load(REPO_ROOT)
     if idx is None:
@@ -164,6 +197,13 @@ def run_localisation(key, summary, description):
         if os.path.exists(abspath):
             with open(abspath, encoding="utf-8", errors="replace") as f:
                 file_texts[p] = f.read()
+    overlaps = check_overlap(key, expanded_files, branch)
+    if overlaps:
+        for h in overlaps:
+            print(f"  [overlap] WAIT  PR #{h['number']} ({h['head']}) already changes: {', '.join(h['files'])}")
+        emit(key, "localise", "blocked", outcome="waiting", reason_code="open_pr_overlap",
+             detail=", ".join(f"#{h['number']}" for h in overlaps))
+        return "waiting", overlaps, None, None, loc["confidence"], complexity
     scan = injection_scan.scan_context_pack(file_texts)
     if not scan["clean"]:
         finding = scan["findings"][0]
@@ -272,7 +312,7 @@ def main():
     print(f"\nTicket: {key} - {summary}\nBranch: {branch}\n")
     # ---------------- Phase 1: decide before touching git or Copilot ----------------
     decision, pack_md, model_tier, model_name, confidence, complexity = \
-        run_localisation(key, summary, description)
+        run_localisation(key, summary, description, branch)
     if decision == "ask_for_info":
         jc.update_labels(key, add=["ai-needs-info"])
         jc.add_comment(key, [
@@ -288,6 +328,30 @@ def main():
             "and stopped before any AI model was invoked. A human needs to review this "
             "ticket and the flagged file before it can proceed."])
         sys.exit(f"STOP: suspicious content detected - {key} labelled ai-blocked. No AI spend.")
+    if decision == "waiting":
+        overlaps = pack_md
+        nums = [h["number"] for h in overlaps]
+        lines = ["AI agent: this ticket changes the same code as an open pull request, so it "
+                 "will wait instead of creating a conflicting change."]
+        for h in overlaps:
+            lines.append(f"PR #{h['number']} ({h['url']}) already changes: {', '.join(h['files'])}")
+        lines.append("It is labelled ai-waiting and returns to ai-ready automatically when "
+                     "that PR is merged or closed, then starts from the latest main. "
+                     "No AI was used and no code was changed.")
+        jc.update_labels(key, add=["ai-waiting"], remove=["ai-ready", "ai-locked"])
+        jc.add_comment(key, lines)
+        if not jc.DRY_RUN:
+            pr_tracker.mark_waiting(key, "pr", prs=nums,
+                                    detail="; ".join(f"#{h['number']}: {', '.join(h['files'])}" for h in overlaps))
+        jc.audit("waiting", key, "overlaps open PR " + ", ".join(f"#{n}" for n in nums))
+        try:
+            import notify
+            notify.notify_event("ticket_waiting", key, "Waiting on " + ", ".join(f"PR #{n}" for n in nums),
+                                url=overlaps[0]["url"])
+        except Exception:
+            pass
+        print(f"WAITING: {key} overlaps open PR(s) {nums} - labelled ai-waiting. No AI spend.")
+        sys.exit(EXIT_WAITING)
     os.environ["AGENT_MODEL_TIER"] = model_tier
     os.environ["AGENT_MODEL_NAME"] = model_name
     routing.write_routing(key, model_tier, model_name, confidence, complexity)

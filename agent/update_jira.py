@@ -4,7 +4,23 @@
 - Labels: removes ai-ready, adds ai-pr-created (keeps ai-locked)
 - Moves the ticket to the review status (JIRA_STATUS_IN_REVIEW)
 Respects AGENT_ENABLED and AGENT_DRY_RUN. Safe to re-run (no duplicates).
-Usage: python update_jira.py CLAUDE-11"""
+Usage: python update_jira.py CLAUDE-11
+
+STEP 2 (v7) - importable handlers used by watch_queue.track_prs() every poll cycle
+(main() above is unchanged):
+  on_pr_event(ev)        acts on one pr_tracker event:
+      MERGED   -> comment, label ai-merged (remove ai-locked), move to JIRA_STATUS_DONE
+      REJECTED -> comment, label ai-rejected (remove ai-locked)
+      CONFLICT -> comment with the two ways forward + notification
+      UPDATE   -> notification only (GitHub Update branch pressed, Validate re-runs)
+      REMIND   -> notification only (no Jira comment spam)
+    Every Jira write is idempotent (label already present -> skipped).
+  release_waiting(open_prs)   moves ai-waiting tickets back to ai-ready when what they
+      waited for is gone: kind "pr" -> none of its PRs is still open; kind "blocker" ->
+      every Jira "is blocked by" ticket is Done. A ticket without a record in
+      logs/waiting.json is treated as "blocker" (checked against its Jira links).
+.env: JIRA_STATUS_DONE=Done (if your workflow has no such transition, a WARNING is printed
+      and the status is left as is - labels and comments still apply)."""
 import os
 import re
 import sys
@@ -15,6 +31,10 @@ import jira_client as jc
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REPORT_DIR = os.path.join(REPO_ROOT, "docs", "ai-reports")
 DONE_LABEL = "ai-pr-created"
+MERGED_LABEL = "ai-merged"
+REJECTED_LABEL = "ai-rejected"
+WAITING_LABEL = "ai-waiting"
+STATUS_DONE = os.getenv("JIRA_STATUS_DONE", "Done").strip() or "Done"
 
 
 def load_pr(key):
@@ -56,7 +76,6 @@ def build_comment(key, pr, summary_lines):
         if link:
             node["marks"] = [{"type": "link", "attrs": {"href": link}}]
         return {"type": "paragraph", "content": [node]}
-
     content = [
         para("AI-assisted fix ready for human review"),
         para(f"Branch: {pr['branch']}"),
@@ -119,41 +138,131 @@ def post_comment(key, body):
     jc.audit("comment", key, "PR comment")
 
 
+# ---------------------------------------------------------------- STEP 2: PR lifecycle
+def _labels(key):
+    return jc.get_issue(key, fields="labels")["fields"].get("labels", [])
+
+
+def _notify(kind, key, title, detail="", url=""):
+    try:
+        import notify
+        notify.notify_event(kind, key, title, detail, url)
+    except Exception as e:
+        print(f"  [notify] WARNING (non-blocking): {e}")
+
+
+def on_pr_event(ev):
+    """Act on one pr_tracker event. Raises nothing for a single bad ticket - logs and continues."""
+    n, url, action = ev["number"], ev["url"], ev["action"]
+    for key in ev["keys"]:
+        try:
+            if action == "MERGED":
+                if MERGED_LABEL in _labels(key):
+                    print(f"  {key}: already {MERGED_LABEL} - skipping")
+                    continue
+                jc.add_comment(key, [
+                    f"Pull request #{n} was merged into main: {url}",
+                    "The Salesforce deploy now waits for approval in GitHub Actions "
+                    "(Review deployments -> salesforce-deploy-gate).",
+                    "Tickets waiting on this change will be released automatically."])
+                jc.update_labels(key, add=[MERGED_LABEL], remove=["ai-locked"])
+                jc.transition(key, STATUS_DONE)
+                _notify("pr_merged", key, f"PR #{n} merged", url=url)
+            elif action == "REJECTED":
+                if REJECTED_LABEL in _labels(key):
+                    print(f"  {key}: already {REJECTED_LABEL} - skipping")
+                    continue
+                jc.add_comment(key, [
+                    f"Pull request #{n} was closed without merging: {url}",
+                    "No change reached main or Salesforce. The branch was kept for reference.",
+                    "To retry: delete the branch, update the ticket if needed, then set the "
+                    "labels back to ai-ready only."])
+                jc.update_labels(key, add=[REJECTED_LABEL], remove=["ai-locked"])
+                _notify("pr_rejected", key, f"PR #{n} closed without merge", url=url)
+            elif action == "CONFLICT":
+                jc.add_comment(key, [
+                    f"Pull request #{n} now conflicts with main (another change to the same "
+                    f"lines was merged first): {url}",
+                    "Option 1: resolve the conflict on GitHub and let Salesforce Validate re-run.",
+                    "Option 2: close the PR, delete the branch and set the labels back to "
+                    "ai-ready only - the agent redoes the ticket from the latest main."])
+                _notify("pr_conflict", key, f"PR #{n} has a merge conflict", url=url)
+            elif action == "UPDATE":
+                _notify("pr_update", key, f"PR #{n} was behind main - branch updated",
+                        ev.get("detail", ""), url)
+            elif action == "REMIND":
+                _notify("pr_reminder", key, f"PR #{n} waiting {ev.get('age_h', '?')} h for review",
+                        url=url)
+            jc.audit("pr_tracker", key, f"PR #{n} {action}")
+        except Exception as e:
+            print(f"  [pr-tracker] WARNING {key} PR #{n} {action}: {e}")
+            jc.audit("pr_tracker", key, f"PR #{n} {action} handling failed: {e}", "failed")
+
+
+def _search(jql, fields):
+    data = jc._request("GET", "/rest/api/3/search/jql",
+                       params={"jql": jql, "maxResults": 50, "fields": fields})
+    return data.get("issues", [])
+
+
+def release_waiting(open_prs):
+    """open_prs: set of open ticket-PR numbers from pr_tracker.track_all().
+    Returns the list of released keys."""
+    import pr_tracker
+    import git_sync
+    released = []
+    jql = f'project = "{jc.PROJECT}" AND labels = "{WAITING_LABEL}" ORDER BY created ASC'
+    for issue in _search(jql, "labels,issuelinks"):
+        key = issue["key"]
+        info = pr_tracker.waiting_info(key) or {"kind": "blocker"}
+        if info.get("kind") == "pr":
+            still_open = [p for p in info.get("prs", []) if p in open_prs]
+            if still_open:
+                continue
+            why = f"PR(s) {', '.join('#%s' % p for p in info.get('prs', []))} no longer open"
+        else:
+            blockers = git_sync.unresolved_blockers(issue)
+            if blockers:
+                continue
+            why = "all blocking tickets are Done"
+        jc.update_labels(key, add=["ai-ready"], remove=[WAITING_LABEL])
+        jc.add_comment(key, [f"AI agent: released back to the queue ({why}).",
+                             "It will be picked up from the latest main on the next poll."])
+        if not jc.DRY_RUN:
+            pr_tracker.clear_waiting(key)
+        _notify("ticket_released", key, "Released to ai-ready", why)
+        jc.audit("release_waiting", key, why)
+        released.append(key)
+    return released
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit("Usage: python update_jira.py <TICKET-KEY>")
     key = sys.argv[1].strip().upper()
     if not re.match(rf"^{re.escape(jc.PROJECT)}-\d+$", key):
         sys.exit(f"STOP: '{key}' is not a valid {jc.PROJECT} ticket key.")
-
     print("=" * 60)
     print(f"AGENT UPDATE JIRA | {key} | Dry run: {jc.DRY_RUN}")
     print("=" * 60)
     if not jc.ENABLED:
         sys.exit("Agent disabled (AGENT_ENABLED is not 'true'). Stopping.")
-
     labels = jc.get_issue(key, fields="labels")["fields"].get("labels", [])
     if "ai-locked" not in labels:
         sys.exit(f"STOP: {key} is not claimed by the agent (no ai-locked label).")
-
     pr = load_pr(key)
     print(f"PR: {pr['pr_url']}\n")
-
     if already_commented(key, pr["pr_url"]):
         print("  PR comment already on ticket - skipping")
         jc.audit("comment", key, "already posted", "skipped")
     else:
         post_comment(key, build_comment(key, pr, load_summary(key, pr["pr_url"])))
-
     attach_report(key)
-
     if DONE_LABEL in labels:
         print(f"  label {DONE_LABEL} already set - skipping")
     else:
         jc.update_labels(key, add=[DONE_LABEL], remove=["ai-ready"])
-
     jc.transition(key, jc.STATUS_IN_REVIEW)
-
     print("\n" + "-" * 60)
     print(f"Jira {key} updated. Waiting for human PR review.")
     if jc.DRY_RUN:
