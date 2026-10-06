@@ -31,6 +31,9 @@ Per ticket:
       -> create_pr -> update_jira
       STEP 2: prepare_fix exit code 3 = "waiting" (ticket overlaps an open PR,
       labelled ai-waiting, $0) - recorded as outcome "waiting", no failure alert.
+      STEP 3: prepare_fix may batch related bugs into this run (batching.py). If the run
+      does not end with a PR, batching.release_members() returns the other tickets to
+      ai-ready (they are retried on their own) before the repo goes back to main.
     finally: return_to_base() (G11) - back to main + fast-forward, whether the
       ticket succeeded or failed, so the NEXT ticket always starts from merged
       main. Each ticket's branch forks from main independently; an unmerged PR
@@ -65,6 +68,7 @@ import code_index
 import git_sync
 import pr_tracker
 import update_jira
+import batching
 try:
     import generate_cost_dashboard as dashboard
 except Exception:
@@ -270,6 +274,13 @@ def process_ticket(key):
     finally:
         events.emit_event(key, "run", "ok" if outcome in ("pr_open", "waiting") else "failed",
                           outcome=outcome, duration_s=round(time.time() - t0, 1))
+        if outcome not in ("pr_open", "waiting"):
+            try:
+                released = batching.release_members(key, outcome)
+                if released:
+                    print(f"  [batch] released back to ai-ready: {', '.join(released)}")
+            except Exception as e:
+                print(f"  [batch] WARNING (non-blocking): could not release batch members: {e}")
         # G11: always leave the repo on main, success or failure. The fix
         # branch is already pushed (or, on failure, kept locally for a human).
         # A dirty tree (e.g. agent crashed mid-edit) is left untouched and
