@@ -1,14 +1,15 @@
 """Step 6.6: Human review gate. Shows a diff-based summary of exactly what
 the headless Copilot CLI fix changed, then BLOCKS for an explicit y/n
 before the pipeline is allowed to continue to Step 7 (validate_fix.py).
-
 The summary is built entirely from `git diff` against the base branch -
 never from anything the agent claims about itself in its Solution Report -
 so it can't be spoofed by a confused agent or a prompt-injected ticket.
 Reuses the exact same ALLOWED_PREFIXES / BLOCKED_PATTERNS constants that
 validate_fix.py enforces, so a restricted-path touch is auto-rejected here
 too, before you even get asked.
-
+v7 (C15): an EMPTY branch (no commits, no changed files) is auto-rejected
+without asking - there is nothing to review. invoke_copilot.py normally
+catches this first; this is the second line of defence.
 Usage: python review_gate.py CLAUDE-11
 Exit code 0 = approved, 1 = rejected or auto-blocked.
 """
@@ -23,7 +24,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BASE = os.getenv("GITHUB_BASE_BRANCH", "main").strip()
 REPORT_DIR = os.path.join(REPO_ROOT, "docs", "ai-reports")
 KEY_PATTERN = re.compile(rf"^{re.escape(jc.PROJECT)}-\d+$")
-
 BUCKET_LABELS = [
     (CLASSES_DIR, "Apex Classes"),
     ("force-app/main/default/triggers/", "Triggers"),
@@ -57,23 +57,27 @@ def main():
     key = sys.argv[1].strip().upper()
     if not KEY_PATTERN.match(key):
         sys.exit(f"STOP: '{key}' is not a valid {jc.PROJECT} ticket key.")
-
     print("=" * 60)
     print(f"REVIEW GATE | {key}")
     print("=" * 60)
-
     branch = git("branch", "--show-current")
     if not branch.startswith(f"fix/{key}-"):
         sys.exit(f"STOP: current branch '{branch}' is not the fix branch for {key}.")
-
     files = [f for f in git("diff", "--name-only", f"{BASE}...HEAD").splitlines() if f]
+    commits = [c for c in git("log", "--format=%h %s", f"{BASE}..HEAD").splitlines() if c]
+    print(f"\nBranch: {branch}")
+    print(f"Commits: {len(commits)}")
+    for c in commits[:10]:
+        print(f"  {c}")
+    print(f"Files changed: {len(files)}")
+    # v7 (C15): nothing to review -> reject without asking
+    if not files or not commits:
+        print("\nNOTHING TO REVIEW - the agent made no committed change on this branch. Auto-rejecting.")
+        jc.audit("review_gate", key, "empty branch - auto-rejected", "failed")
+        sys.exit(1)
     diffstat = git("diff", "--stat", f"{BASE}...HEAD")
     blocked = [f for f in files if any(p in f for p in BLOCKED_PATTERNS)]
     outside = [f for f in files if not f.startswith(ALLOWED_PREFIXES)]
-
-    print(f"\nBranch: {branch}")
-    print(f"Files changed: {len(files)}")
-
     buckets = bucket(files)
     if buckets:
         print("\nObjects/components impacted:")
@@ -81,17 +85,14 @@ def main():
             print(f"  {label}:")
             for f in fs:
                 print(f"    - {f}")
-
     print("\nDiff stat:")
     print("  " + diffstat.replace("\n", "\n  "))
-
     report_path = os.path.join(REPORT_DIR, f"{key}.md")
     if os.path.exists(report_path):
         with open(report_path, encoding="utf-8") as f:
             excerpt = "".join(f.readlines()[:25])
         print("\nSolution Report excerpt (root cause / fix description):")
         print("  " + excerpt.replace("\n", "\n  "))
-
     if blocked or outside:
         bad = sorted(set(blocked + outside))
         print("\nRESTRICTED PATHS TOUCHED - auto-rejecting, this should not happen:")
@@ -99,12 +100,10 @@ def main():
             print(f"  - {f}")
         jc.audit("review_gate", key, "restricted path touched: " + ", ".join(bad), "failed")
         sys.exit(1)
-
     print("\n" + "-" * 60)
     answer = input("Proceed to validation + draft PR + Jira update? [y/N]: ").strip().lower()
     approved = answer in ("y", "yes")
     jc.audit("review_gate", key, f"{len(files)} files changed", "ok" if approved else "rejected")
-
     if not approved:
         print(f"\nRejected. Branch {branch} left as-is for inspection.")
         jc.add_comment(key, [
@@ -112,7 +111,6 @@ def main():
             "Branch left in place for inspection. No PR was created.",
         ])
         sys.exit(1)
-
     print("\nApproved. Proceeding to Step 7 (validate_fix.py).")
 
 
