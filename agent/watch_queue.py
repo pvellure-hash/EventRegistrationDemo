@@ -8,6 +8,14 @@ Startup (hard gate - watcher refuses to start if any FAIL):
     security_checks.run_all()    PHASE 0: production-org guard, branch protection,
                                  GitHub token scope
 Every poll cycle, BEFORE claiming a ticket:
+    track_prs()                  STEP 2: pr_tracker.track_all() reads every open/closed
+                                 ticket PR on GitHub (no AI, $0) and update_jira acts on
+                                 new transitions: merged -> Done + ai-merged; closed ->
+                                 ai-rejected; conflict -> comment + alert; behind ->
+                                 GitHub "Update branch"; open too long -> reminder.
+                                 Then release_waiting() returns ai-waiting tickets to
+                                 ai-ready when their PR/blocker is gone. Fails open:
+                                 a GitHub/Jira hiccup never stops the watcher.
     code_index.build_or_update() PHASE 1: incremental re-index (fast, no AI) so
                                  prepare_fix.py's localisation always sees the
                                  latest merged code, not a stale snapshot.
@@ -21,18 +29,25 @@ Per ticket:
       + production-org re-check
     prepare_fix -> invoke_copilot -> review_gate (human y/n) -> validate_fix
       -> create_pr -> update_jira
+      STEP 2: prepare_fix exit code 3 = "waiting" (ticket overlaps an open PR,
+      labelled ai-waiting, $0) - recorded as outcome "waiting", no failure alert.
     finally: return_to_base() (G11) - back to main + fast-forward, whether the
       ticket succeeded or failed, so the NEXT ticket always starts from merged
       main. Each ticket's branch forks from main independently; an unmerged PR
       is never carried into the next ticket's branch.
+STEP 2 continuous mode: after a ticket ends with a PR or "waiting", the watcher
+  polls again after WATCH_CONTINUE_SECONDS (default 5) instead of the full
+  interval, so a queue of tickets is worked through back to back. Anything else
+  (blocked, failed, nothing claimed) waits the normal WATCH_POLL_INTERVAL_SECONDS.
   Every step emits started/ok/failed run events with durations, so the
   funnel and cycle times are measured without changing the other scripts.
   The cost dashboard AND the full pipeline command-center dashboard
   (Phase 2 - generate_pipeline_dashboard.py) are both refreshed after the
   agent step and at ticket end, so either dashboard reflects every ticket
   run so far without any manual step.
-.env: WATCH_POLL_INTERVAL_SECONDS=300, MONTHLY_BUDGET_USD, MAX_TICKETS_PER_DAY,
-      TICKET_CREDIT_CEILING, SF_PACKAGE_DIR, NOTIFY_* (see notify.py)
+.env: WATCH_POLL_INTERVAL_SECONDS=300, WATCH_CONTINUE_SECONDS=5, MONTHLY_BUDGET_USD,
+      MAX_TICKETS_PER_DAY, TICKET_CREDIT_CEILING, SF_PACKAGE_DIR, NOTIFY_* (see notify.py),
+      PR_REMIND_HOURS, PR_AUTO_UPDATE_BRANCH, OVERLAP_GUARD_ENABLED, JIRA_STATUS_DONE
 """
 import os
 import sys
@@ -48,6 +63,8 @@ import redact
 import security_checks
 import code_index
 import git_sync
+import pr_tracker
+import update_jira
 try:
     import generate_cost_dashboard as dashboard
 except Exception:
@@ -56,7 +73,9 @@ except Exception:
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))
 POLL_INTERVAL = int(os.getenv("WATCH_POLL_INTERVAL_SECONDS", "300"))
+CONTINUE_INTERVAL = int(os.getenv("WATCH_CONTINUE_SECONDS", "5"))
 BASE_BRANCH = os.getenv("GITHUB_BASE_BRANCH", "main").strip()
+EXIT_WAITING = 3   # prepare_fix.py: ticket overlaps an open PR -> ai-waiting
 
 PIPELINE_STEPS = [
     ("prepare_fix.py", "prepare", "system"),
@@ -140,18 +159,39 @@ def sync_to_base(key, when):
     return ok
 
 
+def track_prs():
+    """STEP 2: follow open PRs and release waiting tickets. No AI, fails open."""
+    try:
+        evs, open_prs = pr_tracker.track_all(apply=not jc.DRY_RUN)
+    except Exception as e:
+        print(f"  [pr-tracker] WARNING (non-blocking): could not read PRs: {e}")
+        return
+    print(f"  [pr-tracker] open ticket PRs: {', '.join('#%s' % n for n in sorted(open_prs)) or 'none'}"
+          f" | new updates: {len(evs)}")
+    for ev in evs:
+        print(f"  [pr-tracker] {ev['action']:<8} PR #{ev['number']} {','.join(ev['keys'])} {ev.get('detail', '')}")
+        update_jira.on_pr_event(ev)
+    try:
+        released = update_jira.release_waiting(open_prs)
+        if released:
+            print(f"  [pr-tracker] released to ai-ready: {', '.join(released)}")
+    except Exception as e:
+        print(f"  [pr-tracker] WARNING (non-blocking): release_waiting failed: {e}")
+
+
 def run_step(script, step, actor, key):
     print(f"\n>>> {script} {key}")
     events.emit_event(key, step, "started", actor=actor)
     t0 = time.time()
     r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, script), key], cwd=AGENT_DIR)
     ok = r.returncode == 0
-    events.emit_event(key, step, "ok" if ok else "failed", actor=actor,
+    waiting = (script == "prepare_fix.py" and r.returncode == EXIT_WAITING)
+    events.emit_event(key, step, "ok" if ok else ("blocked" if waiting else "failed"), actor=actor,
                       duration_s=round(time.time() - t0, 1),
-                      reason_code=None if ok else f"exit_{r.returncode}")
+                      reason_code=None if ok else ("open_pr_overlap" if waiting else f"exit_{r.returncode}"))
     if script == "invoke_copilot.py":
         refresh_dashboard(key, "after agent")
-    return ok, step
+    return ok, step, r.returncode
 
 
 def claim_next():
@@ -200,6 +240,7 @@ def resync_before_ticket(key):
 
 
 def process_ticket(key):
+    """Returns the outcome string: pr_open, waiting, blocked, or a failure outcome."""
     os.environ["AGENT_RUN_ID"] = events.new_run_id(key)
     print("\n" + "#" * 60 + f"\n# Processing {key}  (run {os.environ['AGENT_RUN_ID']})\n" + "#" * 60)
     events.emit_event(key, "run", "started", actor="system")
@@ -208,20 +249,26 @@ def process_ticket(key):
     try:
         if not resync_before_ticket(key):
             outcome = "blocked"
-            return False
+            return outcome
         for script, step, actor in PIPELINE_STEPS:
-            ok, step = run_step(script, step, actor, key)
-            if not ok:
-                outcome = OUTCOME_ON_FAIL.get(step, "failed")
-                print(f"[{key}] Stopped at {script}.")
-                jc.audit("watch_queue", key, f"stopped at {script}", "failed")
-                notify.notify_failure(step=script, ticket=key, reason=f"{script} exited non-zero")
-                return False
-        print(f"[{key}] Completed. Draft PR awaiting human review/merge.")
+            ok, step, rc = run_step(script, step, actor, key)
+            if ok:
+                continue
+            if step == "prepare" and rc == EXIT_WAITING:
+                outcome = "waiting"
+                print(f"[{key}] Waiting on an open PR (ai-waiting). No AI spend. Moving on.")
+                jc.audit("watch_queue", key, "waiting on open PR", "skipped")
+                return outcome
+            outcome = OUTCOME_ON_FAIL.get(step, "failed")
+            print(f"[{key}] Stopped at {script}.")
+            jc.audit("watch_queue", key, f"stopped at {script}", "failed")
+            notify.notify_failure(step=script, ticket=key, reason=f"{script} exited non-zero")
+            return outcome
+        print(f"[{key}] Completed. Draft PR awaiting human review/merge. Moving on to the next ticket.")
         jc.audit("watch_queue", key, "completed full pipeline", "ok")
-        return True
+        return outcome
     finally:
-        events.emit_event(key, "run", "ok" if outcome == "pr_open" else "failed",
+        events.emit_event(key, "run", "ok" if outcome in ("pr_open", "waiting") else "failed",
                           outcome=outcome, duration_s=round(time.time() - t0, 1))
         # G11: always leave the repo on main, success or failure. The fix
         # branch is already pushed (or, on failure, kept locally for a human).
@@ -230,9 +277,7 @@ def process_ticket(key):
         sync_to_base(key, "end of ticket")
         refresh_dashboard(key, "end of ticket")
         # PHASE 1: re-index AFTER returning to main, so the index reflects
-        # merged code only - not this ticket's unmerged fix branch (which
-        # would otherwise make the next ticket's localisation see code that
-        # isn't on main yet).
+        # merged code only - not this ticket's unmerged fix branch.
         refresh_index(when="end of ticket")
         os.environ.pop("AGENT_RUN_ID", None)
 
@@ -261,19 +306,23 @@ def poll_loop():
     print(f"Limits: budget ${guards.MONTHLY_BUDGET_USD:.0f}/month, {guards.MAX_TICKETS_PER_DAY} tickets/day, "
           f"{guards.TICKET_CREDIT_CEILING:.0f} credits/ticket")
     while True:
+        sleep_for = POLL_INTERVAL
         try:
-            refresh_index(when="poll cycle")  # PHASE 1: pick up anything merged since last cycle
+            track_prs()                        # STEP 2: merged/closed/conflict/behind/reminders + releases
+            refresh_index(when="poll cycle")   # PHASE 1: pick up anything merged since last cycle
             if spending_gates_open():
                 key = claim_next()
                 if key:
-                    process_ticket(key)
+                    outcome = process_ticket(key)
+                    if outcome in ("pr_open", "waiting"):
+                        sleep_for = CONTINUE_INTERVAL   # STEP 2: keep going through the queue
                 else:
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Nothing claimed. Sleeping {POLL_INTERVAL}s.")
         except Exception as e:
             print(f"Error during poll cycle: {e}")
             jc.audit("watch_queue", "-", redact.redact(str(e)), "failed")
             notify.notify_failure(step="poll_loop", ticket="-", reason=redact.redact(str(e)))
-        time.sleep(POLL_INTERVAL)
+        time.sleep(sleep_for)
 
 
 if __name__ == "__main__":
