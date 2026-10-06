@@ -1,5 +1,9 @@
 """Step 0: Long-running watcher.
 Startup (hard gate - watcher refuses to start if any FAIL):
+    git_sync.sync_base()         G11: if the repo was left on a fix branch (e.g. the
+                                 watcher was stopped mid-ticket), return to main and
+                                 fast-forward BEFORE preflight runs. Never discards work:
+                                 a dirty tree is left untouched and preflight reports it.
     preflight.run_all()          repo state, Copilot CLI, credentials, Salesforce
     security_checks.run_all()    PHASE 0: production-org guard, branch protection,
                                  GitHub token scope
@@ -13,9 +17,14 @@ Every poll cycle, BEFORE claiming a ticket:
   so no ticket is left half-processed. One alert per day per reason.
 Per ticket:
     new run_id (shared with child steps via AGENT_RUN_ID)
-    preflight.check_git_state() + production-org re-check
+    git_sync.sync_base() (G11 self-heal) + preflight.check_git_state()
+      + production-org re-check
     prepare_fix -> invoke_copilot -> review_gate (human y/n) -> validate_fix
       -> create_pr -> update_jira
+    finally: return_to_base() (G11) - back to main + fast-forward, whether the
+      ticket succeeded or failed, so the NEXT ticket always starts from merged
+      main. Each ticket's branch forks from main independently; an unmerged PR
+      is never carried into the next ticket's branch.
   Every step emits started/ok/failed run events with durations, so the
   funnel and cycle times are measured without changing the other scripts.
   The cost dashboard AND the full pipeline command-center dashboard
@@ -38,13 +47,17 @@ import guards
 import redact
 import security_checks
 import code_index
+import git_sync
 try:
     import generate_cost_dashboard as dashboard
 except Exception:
     dashboard = None
+
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))
 POLL_INTERVAL = int(os.getenv("WATCH_POLL_INTERVAL_SECONDS", "300"))
+BASE_BRANCH = os.getenv("GITHUB_BASE_BRANCH", "main").strip()
+
 PIPELINE_STEPS = [
     ("prepare_fix.py", "prepare", "system"),
     ("invoke_copilot.py", "agent_step", "agent"),
@@ -55,12 +68,17 @@ PIPELINE_STEPS = [
 ]
 OUTCOME_ON_FAIL = {"prepare": "blocked", "agent_step": "agent_failed", "review": "rejected_gate",
                    "validate": "failed_validation", "pr": "pr_failed", "jira": "jira_failed"}
+
 _alerted = {}
+
+
 def alert_once_per_day(reason_key, step, reason):
     today = datetime.date.today()
     if _alerted.get(reason_key) != today:
         _alerted[reason_key] = today
         notify.notify_failure(step=step, ticket="-", reason=redact.redact(reason))
+
+
 def refresh_dashboard(key, when=""):
     if dashboard:
         try:
@@ -84,6 +102,8 @@ def refresh_dashboard(key, when=""):
             print(f"  [pipeline-dashboard] WARNING (non-blocking): exit {r.returncode}: {r.stderr.strip()[:200]}")
     except Exception as e:
         print(f"  [pipeline-dashboard] WARNING (non-blocking): {e}")
+
+
 def refresh_index(when=""):
     """PHASE 1: incremental code-index rebuild. No AI cost - pure parsing.
     Wrapped so an indexing problem can NEVER block ticket intake; the
@@ -98,6 +118,28 @@ def refresh_index(when=""):
     except Exception as e:
         print(f"  [index] WARNING (non-blocking): could not refresh index: {e}")
         return None
+
+
+def sync_to_base(key, when):
+    """G11: put the repo back on main at the latest origin/main.
+    Safe by design (git_sync.sync_base): never discards or force-updates anything.
+    If the tree is dirty or local main has diverged it changes NOTHING, reports
+    why, and returns False - the next ticket's re-check will then fail A1/A2/A3
+    and that ticket is skipped with a notification instead of building on a
+    wrong base."""
+    try:
+        ok, msg = git_sync.sync_base(BASE_BRANCH)
+    except Exception as e:
+        ok, msg = False, f"git_sync raised: {e}"
+    print(f"  [git-sync] {'OK  ' if ok else 'STOP'} ({when}) {msg}")
+    events.emit_event(key, "git_sync", "ok" if ok else "failed", actor="system",
+                      reason_code=None if ok else "sync_base", detail=redact.redact(msg))
+    if not ok:
+        jc.audit("watch_queue", key, f"git sync ({when}) did not run: {msg}", "failed")
+        notify.notify_failure(step=f"git_sync ({when})", ticket=key, reason=redact.redact(msg))
+    return ok
+
+
 def run_step(script, step, actor, key):
     print(f"\n>>> {script} {key}")
     events.emit_event(key, step, "started", actor=actor)
@@ -110,6 +152,8 @@ def run_step(script, step, actor, key):
     if script == "invoke_copilot.py":
         refresh_dashboard(key, "after agent")
     return ok, step
+
+
 def claim_next():
     r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, "claim_ticket.py")],
                        cwd=AGENT_DIR, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -121,6 +165,8 @@ def claim_next():
             val = line.split("Claimed:", 1)[1].strip()
             return None if val == "none" else val
     return None
+
+
 def spending_gates_open():
     evs = events.read_events()
     for name, (ok, why) in (("budget", guards.check_budget(evs)), ("daily_cap", guards.check_daily_cap(evs))):
@@ -133,8 +179,14 @@ def spending_gates_open():
             print(f"  {why}")
             alert_once_per_day(name + "_warn", "budget_warning", why)
     return True
+
+
 def resync_before_ticket(key):
     print(f"\n--- Re-checks before {key} ---")
+    # G11 self-heal: normally the previous ticket's finally: already returned
+    # to main; this covers a crash/Ctrl+C between tickets. If it can't sync
+    # safely, check_git_state() below reports exactly why and the ticket skips.
+    sync_to_base(key, "before ticket")
     results = preflight.check_git_state() + security_checks.check_salesforce_org()
     for name, passed, detail in results:
         print(f"  {'PASS' if passed else 'FAIL'}  {name}  {'' if passed else detail}")
@@ -145,6 +197,8 @@ def resync_before_ticket(key):
     jc.audit("watch_queue", key, f"skipped - re-check failed: {reason}", "failed")
     notify.notify_failure(step="preflight", ticket=key, reason=redact.redact(reason))
     return False
+
+
 def process_ticket(key):
     os.environ["AGENT_RUN_ID"] = events.new_run_id(key)
     print("\n" + "#" * 60 + f"\n# Processing {key}  (run {os.environ['AGENT_RUN_ID']})\n" + "#" * 60)
@@ -169,18 +223,25 @@ def process_ticket(key):
     finally:
         events.emit_event(key, "run", "ok" if outcome == "pr_open" else "failed",
                           outcome=outcome, duration_s=round(time.time() - t0, 1))
+        # G11: always leave the repo on main, success or failure. The fix
+        # branch is already pushed (or, on failure, kept locally for a human).
+        # A dirty tree (e.g. agent crashed mid-edit) is left untouched and
+        # reported - work is never discarded.
+        sync_to_base(key, "end of ticket")
         refresh_dashboard(key, "end of ticket")
-        # PHASE 1: the PR for this ticket isn't merged yet (that's a human
-        # action later), but re-indexing here is still cheap and harmless -
-        # it picks up the fix branch's own committed files for free and
-        # costs nothing if nothing changed. The authoritative refresh is
-        # still the one at the top of each poll cycle below, which runs
-        # against main after merges actually land.
+        # PHASE 1: re-index AFTER returning to main, so the index reflects
+        # merged code only - not this ticket's unmerged fix branch (which
+        # would otherwise make the next ticket's localisation see code that
+        # isn't on main yet).
         refresh_index(when="end of ticket")
         os.environ.pop("AGENT_RUN_ID", None)
+
+
 def poll_loop():
     if not jc.ENABLED:
         sys.exit("Agent disabled (AGENT_ENABLED is not 'true'). Stopping.")
+    # G11: recover from a watcher that was stopped mid-ticket on a fix branch.
+    sync_to_base("-", "startup")
     print("Running pre-flight and security checks...\n")
     ok1, res1 = preflight.run_all(verbose=True)
     print()
@@ -213,6 +274,8 @@ def poll_loop():
             jc.audit("watch_queue", "-", redact.redact(str(e)), "failed")
             notify.notify_failure(step="poll_loop", ticket="-", reason=redact.redact(str(e)))
         time.sleep(POLL_INTERVAL)
+
+
 if __name__ == "__main__":
     try:
         poll_loop()
