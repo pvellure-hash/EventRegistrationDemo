@@ -152,4 +152,43 @@ private class EventRegistrationControllerTest {
         System.assertEquals('Second Person', results[0].Attendee_Name__c,
             'Most recently created registration should be first.');
     }
+
+    @isTest
+    static void testUpdateRegistrationAndValidation() {
+        Id registrationId = createRegistrationForUpdate(); Date updatedEventDate = Date.today().addDays(12);
+
+        Test.startTest();
+        EventRegistrationController.updateRegistration(registrationId, '555-987-6543', 10, updatedEventDate);
+        for (Integer guests : new List<Integer>{ null, 0, 11 }) {
+            assertUpdateRejected(registrationId, guests, Date.today().addDays(5), 'Number of guests must be between 1 and 10.');
+        }
+        for (Date invalidDate : new List<Date>{ null, Date.today(), Date.today().addDays(-1) }) {
+            assertUpdateRejected(registrationId, 2, invalidDate, 'Event date must be in the future.');
+        }
+        assertUpdateRejected(null, 2, Date.today().addDays(5), 'Registration was not found or is not accessible.');
+        Test.stopTest();
+
+        Event_Registration__c registration = [SELECT Attendee_Name__c, Email__c, Phone__c,
+            Number_of_Guests__c, Event_Date__c FROM Event_Registration__c
+            WHERE Id = :registrationId];
+        System.assertEquals('Edit Tester', registration.Attendee_Name__c, 'CLAUDE-18: Name is unchanged.');
+        System.assertEquals('edit.tester@example.com', registration.Email__c, 'CLAUDE-18: Email is unchanged.');
+        System.assertEquals('555-987-6543', registration.Phone__c);
+        System.assertEquals(10, registration.Number_of_Guests__c, 'CLAUDE-18: Max guests should be accepted.');
+        System.assertEquals(updatedEventDate, registration.Event_Date__c);
+    }
+
+    private static Id createRegistrationForUpdate() {
+        return EventRegistrationController.submitRegistration('Edit Tester', 'edit.tester@example.com',
+            '555-111-2222', 2, Date.today().addDays(5));
+    }
+
+    private static void assertUpdateRejected(Id registrationId, Integer guests,
+                                             Date eventDate, String expectedMessage) {
+        String errorMessage;
+        try { EventRegistrationController.updateRegistration(registrationId, '555-987-6543', guests, eventDate); }
+        catch (AuraHandledException e) { errorMessage = e.getMessage(); }
+        System.assertEquals(expectedMessage, errorMessage,
+            'CLAUDE-18: Invalid update values must be rejected with the expected message.');
+    }
 }

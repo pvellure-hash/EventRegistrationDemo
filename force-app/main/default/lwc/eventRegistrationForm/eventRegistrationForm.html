@@ -5,7 +5,7 @@
             <template if:true={showSuccess}>
                 <div class="slds-notify slds-notify_alert slds-theme_success" role="alert">
                     <span class="slds-assistive-text">Success</span>
-                    Registration submitted successfully! Confirmation number: {lastRegistrationId}
+                    {successMessage}
                 </div>
             </template>
 
@@ -20,6 +20,7 @@
                 label="Attendee Name"
                 value={attendeeName}
                 onchange={handleNameChange}
+                disabled={isEditing}
                 required>
             </lightning-input>
 
@@ -28,6 +29,7 @@
                 label="Email"
                 value={email}
                 onchange={handleEmailChange}
+                disabled={isEditing}
                 required>
             </lightning-input>
 
@@ -59,7 +61,7 @@
             <div class="slds-p-top_medium">
                 <lightning-button
                     variant="brand"
-                    label="Submit Registration"
+                    label={submitButtonLabel}
                     onclick={handleSubmit}
                     disabled={isSubmitting}>
                 </lightning-button>
@@ -78,6 +80,7 @@
                             <th scope="col">Guests</th>
                             <th scope="col">Event Date</th>
                             <th scope="col">Status</th>
+                            <th scope="col">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -88,6 +91,14 @@
                                 <td>{reg.Number_of_Guests__c}</td>
                                 <td>{reg.Event_Date__c}</td>
                                 <td>{reg.Status__c}</td>
+                                <td>
+                                    <lightning-button
+                                        label="Edit"
+                                        data-registration-id={reg.Id}
+                                        onclick={handleEdit}
+                                        disabled={isSubmitting}>
+                                    </lightning-button>
+                                </td>
                             </tr>
                         </template>
                     </tbody>
