@@ -232,9 +232,10 @@ const CXCOL={simple:'var(--green)',moderate:'var(--teal)',complex:'var(--violet)
 const TIERCOL={Economy:'var(--green)',Standard:'var(--teal)',Premium:'var(--violet)',Unknown:'var(--faint)'};
 const usd=c=>'$'+(c*CFG.creditUsd).toFixed(2);
 const fmtK=n=>n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
-const day=d=>new Date(d).toISOString().slice(0,10);
+// Local calendar date (not UTC): a 9 p.m. Pacific run belongs to today, not tomorrow.
+const day=d=>{const x=new Date(d);return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0')};
 /* ===== state & filters ===== */
-const S={project:'all',range:0,cx:new Set(['simple','moderate','complex','unknown']),q:'',sort:'time',asc:false};
+const S={project:'all',range:30,cx:new Set(['simple','moderate','complex','unknown']),q:'',sort:'time',asc:false};
 const projects=[...new Set(DATA.map(d=>d.project))];
 const fP=document.getElementById('fProject');projects.forEach(p=>fP.insertAdjacentHTML('beforeend',`<option>${p}</option>`));
 fP.onchange=e=>{S.project=e.target.value;render()};
@@ -268,7 +269,7 @@ function renderKPIs(rows){
   const cyc=prod.length?prod.reduce((s,r)=>s+r.durations.copilot+r.durations.gate+r.durations.validate+2,0)/prod.length:0;
   const K=[
     {l:'Cost per delivered fix',v:usd(cpf),s:`${prod.length} PRs from ${all.length} ticket run(s)`,hero:1,sp:dailySeries(all,r=>r.reduce((s,x)=>s+x.credits,0)/(r.filter(x=>PRODUCTIVE.has(x.outcome)).length||1)),c:'#86BC25'},
-    {l:'Total AI spend',v:usd(credits),s:`${credits.toFixed(2)} AI credits`,sp:dailySeries(all,r=>r.reduce((s,x)=>s+x.credits,0)),c:'#22b8cf'},
+    {l:'Total AI spend',v:usd(credits),s:`${credits.toFixed(2)} AI credits · ${S.range?'last '+S.range+' days':'all time'}`,sp:dailySeries(all,r=>r.reduce((s,x)=>s+x.credits,0)),c:'#22b8cf'},
     {l:'PRs opened',v:prod.length,s:`${merged.length} confirmed merged`,sp:dailySeries(all,r=>r.filter(x=>PRODUCTIVE.has(x.outcome)).length),c:'#86BC25'},
     {l:'Wasted spend',v:(credits?wasted/credits*100:0).toFixed(1)+'%',s:`${usd(wasted)} on runs with no PR`,bad:1,sp:dailySeries(all,r=>r.filter(x=>!PRODUCTIVE.has(x.outcome)).reduce((s,x)=>s+x.credits,0)),c:'#ff5d62'},
     {l:'Prompt cache hit',v:(tok.i?tok.c/tok.i*100:0).toFixed(1)+'%',s:'Cached input billed at ~10%',sp:dailySeries(all,r=>{const i=r.reduce((s,x)=>s+x.tokens.cached+x.tokens.fresh,0);return i?r.reduce((s,x)=>s+x.tokens.cached,0)/i:0}),c:'#8b7cf6'},
