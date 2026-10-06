@@ -58,7 +58,7 @@ main{padding:22px 28px 60px;max-width:1560px;margin:0 auto}
 .row2{grid-template-columns:2.1fr 1fr;margin-top:16px}
 .row3{grid-template-columns:1fr 1fr 1fr;margin-top:16px}
 .row4{grid-template-columns:1.35fr 1fr;margin-top:16px}
-@media(max-width:1100px){.row2,.row3,.row4{grid-template-columns:1fr}}
+@media(max-width:1100px){.row2,.row3,.row4,.row3b{grid-template-columns:1fr!important}}
 .card h3{margin:0;font-size:13px;font-weight:650;letter-spacing:.02em}
 .card .hd{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;gap:10px}
 .card .hd p{margin:3px 0 0;color:var(--muted);font-size:11.5px}
@@ -129,6 +129,24 @@ footer{color:var(--muted);font-size:11.5px;text-align:center;margin-top:28px;lin
 .chips{display:flex;gap:6px}
 .chip{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:16px;padding:5px 11px;font:inherit;font-size:11.5px;cursor:pointer}
 .chip.on{border-color:var(--green);color:var(--green);background:rgba(134,188,37,.08)}
+.tl .s .when{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:2px}
+.tl .s .dur{float:right;font-size:11.5px;font-weight:650;color:var(--text);font-variant-numeric:tabular-nums}
+.tl .s.run::before{border-color:var(--teal)}
+.tl .s.wait::before{border-color:var(--amber)}
+.e2e{display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding:10px 12px;border-radius:10px;background:var(--bg2);border:1px solid var(--border);font-size:12.5px}
+[data-theme=light] .e2e{background:#f6f8fb}
+.e2e b{font-size:16px;font-variant-numeric:tabular-nums}
+.tbar{display:grid;grid-template-columns:170px 1fr 70px;align-items:center;gap:10px;margin:8px 0;font-size:12.5px}
+.tbar .track{background:var(--bg2);border-radius:6px;height:16px;overflow:hidden}
+[data-theme=light] .tbar .track{background:#eef1f5}
+.tbar .fill{height:16px;border-radius:6px}
+.tbar .n{text-align:right;font-variant-numeric:tabular-nums;font-weight:650}
+.q{display:flex;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12.5px}
+.q:last-child{border-bottom:0}
+.q .k{font-weight:700;min-width:80px}
+.q .m{color:var(--muted);flex:1}
+.qh{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;font-weight:650;margin:12px 0 2px}
+.prl{color:var(--teal);text-decoration:none;font-weight:650}
 </style>
 </head>
 <body>
@@ -187,13 +205,27 @@ footer{color:var(--muted);font-size:11.5px;text-align:center;margin-top:28px;lin
   </section>
   <section class="grid row4">
     <div class="card">
-      <div class="hd"><div><h3>Ticket ledger</h3><p>Click any row to see its full run timeline and token breakdown</p></div><input type="search" id="q" placeholder="Search ticket, outcome, project…"></div>
+      <div class="hd"><div><h3>Where the time goes</h3><p>Average duration of each step, for runs in the selected period</p></div><span class="pill p-info" id="timeTotal"></span></div>
+      <div id="timeBars"></div>
+    </div>
+    <div class="card">
+      <div class="hd"><div><h3>Review queue</h3><p>Open pull requests and tickets waiting on them (from GitHub, refreshed every poll)</p></div><span class="pill p-mute" id="queueAt"></span></div>
+      <div id="queue"></div>
+    </div>
+  </section>
+  <section class="grid" style="margin-top:16px">
+    <div class="card">
+      <div class="hd"><div><h3>Ticket ledger</h3><p>Click any row for the step-by-step timeline (start, end, duration) and PR status</p></div><input type="search" id="q" placeholder="Search ticket, outcome, project…"></div>
       <div class="table-wrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
     </div>
+  </section>
+  <section class="grid row3b" style="grid-template-columns:1fr 1fr;margin-top:16px">
     <div class="card">
       <div class="hd"><div><h3>Guardrail posture</h3><p>Controls verified on the latest pre-flight run</p></div><span class="pill p-ok" id="guardScore"></span></div>
       <div id="guards"></div>
-      <div class="hd" style="margin-top:18px"><div><h3>Token economics</h3><p>Where tokens go (period total)</p></div></div>
+    </div>
+    <div class="card">
+      <div class="hd"><div><h3>Token economics</h3><p>Where tokens go (period total)</p></div></div>
       <div id="tokens"></div>
     </div>
   </section>
@@ -211,6 +243,7 @@ footer{color:var(--muted);font-size:11.5px;text-align:center;margin-top:28px;lin
    so it accumulates across all tickets run so far.
    ============================================================ */
 window.__PIPELINE_DATA__ = __PIPELINE_DATA_JSON__;
+const QUEUE = __QUEUE_JSON__;
 const CFG = { monthlyBudgetUsd: __MONTHLY_BUDGET__, creditUsd: 0.01, perTicketCeilingCredits: __TICKET_CEILING__, routingStartDay: 0, now: new Date(__NOW_ISO__) };
 const DATA = (window.__PIPELINE_DATA__ && window.__PIPELINE_DATA__.length) ? window.__PIPELINE_DATA__ : [];
 if(window.__PIPELINE_DATA__ && window.__PIPELINE_DATA__.length) document.getElementById('banner').style.display='none';
@@ -219,7 +252,12 @@ if(window.__PIPELINE_DATA__ && window.__PIPELINE_DATA__.length) document.getElem
 // validate->failed_validation, pr->pr_failed, jira->jira_failed. Extended here so no
 // outcome value the generator can emit is ever missing from this lookup (an unmapped
 // key would otherwise throw when the table/drawer try to render it).
-const OUT={merged:['Merged','p-ok','var(--green)'],pr_open:['PR open (not yet confirmed merged)','p-info','var(--teal)'],
+const OUT={merged:['Merged','p-ok','var(--green)'],pr_open:['PR open — awaiting review','p-info','var(--teal)'],
+  pr_rejected:['PR closed without merge','p-warn','var(--amber)'],
+  waiting:['Waiting on open PR / blocker','p-mute','var(--amber)'],
+  agent_no_changes:['Agent stopped — no changes','p-bad','var(--red)'],
+  agent_uncommitted:['Agent edits not committed','p-bad','var(--red)'],
+  blocked:['Blocked at pre-check','p-mute','var(--muted)'],failed:['Failed','p-bad','var(--red)'],
   rejected_gate:['Rejected at gate','p-warn','var(--amber)'],
   failed_validation:['Failed validation','p-bad','var(--red)'],timed_out:['Timed out','p-bad','var(--red)'],
   ceiling_hit:['Cost ceiling hit','p-bad','var(--red)'],blocked_triage:['Blocked at triage / needs info','p-mute','var(--muted)'],
@@ -227,7 +265,11 @@ const OUT={merged:['Merged','p-ok','var(--green)'],pr_open:['PR open (not yet co
   jira_failed:['Jira update failed','p-warn','var(--amber)'],locked:['Skipped (duplicate run lock)','p-mute','var(--muted)'],
   budget_blocked:['Blocked - monthly budget reached','p-mute','var(--muted)'],
   blocked_other:['Blocked (guard)','p-mute','var(--muted)'],unknown:['Unknown / in progress','p-mute','var(--muted)']};
-const PRODUCTIVE=new Set(['merged','pr_open']);
+const PRODUCTIVE=new Set(['merged','pr_open','pr_rejected']);
+const fmtDur=s=>{if(s==null||isNaN(s))return '—';s=Math.round(s);if(s<60)return s+'s';const m=Math.floor(s/60),r=s%60;if(m<60)return m+'m '+String(r).padStart(2,'0')+'s';const h=Math.floor(m/60),mm=m%60;if(h<48)return h+'h '+String(mm).padStart(2,'0')+'m';return Math.floor(h/24)+'d '+(h%24)+'h'};
+const fmtT=t=>t?new Date(t).toLocaleString('en-CA',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit'}):'—';
+const median=a=>{const v=a.filter(x=>x!=null&&!isNaN(x)).sort((x,y)=>x-y);if(!v.length)return null;const m=Math.floor(v.length/2);return v.length%2?v[m]:(v[m-1]+v[m])/2};
+const prPill=r=>r.prState==='merged'?`<span class="pill p-ok">#${r.prNumber||''} merged</span>`:r.prState==='closed'?`<span class="pill p-warn">#${r.prNumber||''} closed</span>`:r.prState==='open'?`<span class="pill p-info">${r.prNumber?'#'+r.prNumber+' ':''}open</span>`:'<span style="color:var(--faint)">—</span>';
 const CXCOL={simple:'var(--green)',moderate:'var(--teal)',complex:'var(--violet)',unknown:'var(--faint)'};
 const TIERCOL={Economy:'var(--green)',Standard:'var(--teal)',Premium:'var(--violet)',Unknown:'var(--faint)'};
 const usd=c=>'$'+(c*CFG.creditUsd).toFixed(2);
@@ -266,14 +308,14 @@ function renderKPIs(rows){
   const wasted=all.filter(r=>!PRODUCTIVE.has(r.outcome)).reduce((s,r)=>s+r.credits,0);
   const tok=all.reduce((a,r)=>({c:a.c+r.tokens.cached,i:a.i+r.tokens.cached+r.tokens.fresh}),{c:0,i:0});
   const cpf=prod.length?credits/prod.length:0;
-  const cyc=prod.length?prod.reduce((s,r)=>s+r.durations.copilot+r.durations.gate+r.durations.validate+2,0)/prod.length:0;
+  const e2eMed=median(prod.map(r=>r.e2e_s)), ttmMed=median(merged.map(r=>r.timeToMerge_s));
   const K=[
     {l:'Cost per delivered fix',v:usd(cpf),s:`${prod.length} PRs from ${all.length} ticket run(s)`,hero:1,sp:dailySeries(all,r=>r.reduce((s,x)=>s+x.credits,0)/(r.filter(x=>PRODUCTIVE.has(x.outcome)).length||1)),c:'#86BC25'},
     {l:'Total AI spend',v:usd(credits),s:`${credits.toFixed(2)} AI credits · ${S.range?'last '+S.range+' days':'all time'}`,sp:dailySeries(all,r=>r.reduce((s,x)=>s+x.credits,0)),c:'#22b8cf'},
-    {l:'PRs opened',v:prod.length,s:`${merged.length} confirmed merged`,sp:dailySeries(all,r=>r.filter(x=>PRODUCTIVE.has(x.outcome)).length),c:'#86BC25'},
+    {l:'PRs opened',v:prod.length,s:`${merged.length} merged · ${all.filter(r=>r.outcome==='pr_open').length} open · ${all.filter(r=>r.outcome==='pr_rejected').length} closed`,sp:dailySeries(all,r=>r.filter(x=>PRODUCTIVE.has(x.outcome)).length),c:'#86BC25'},
     {l:'Wasted spend',v:(credits?wasted/credits*100:0).toFixed(1)+'%',s:`${usd(wasted)} on runs with no PR`,bad:1,sp:dailySeries(all,r=>r.filter(x=>!PRODUCTIVE.has(x.outcome)).reduce((s,x)=>s+x.credits,0)),c:'#ff5d62'},
     {l:'Prompt cache hit',v:(tok.i?tok.c/tok.i*100:0).toFixed(1)+'%',s:'Cached input billed at ~10%',sp:dailySeries(all,r=>{const i=r.reduce((s,x)=>s+x.tokens.cached+x.tokens.fresh,0);return i?r.reduce((s,x)=>s+x.tokens.cached,0)/i:0}),c:'#8b7cf6'},
-    {l:'Avg cycle time',v:cyc.toFixed(0)+' min',s:'Claim → draft PR (incl. human gate)',sp:dailySeries(prod,r=>r.length?r.reduce((s,x)=>s+x.durations.copilot+x.durations.gate,0)/r.length:0),c:'#f5a623'},
+    {l:'End-to-end time',v:fmtDur(e2eMed),s:`Median claim → draft PR · merge ${ttmMed!=null?'+'+fmtDur(ttmMed):'n/a'}`,sp:dailySeries(prod,r=>r.length?r.reduce((s,x)=>s+(x.e2e_s||0),0)/r.length:0),c:'#f5a623'},
   ];
   const host=document.getElementById('kpis');host.innerHTML='';
   K.forEach((k,i)=>{const el=document.createElement('div');el.className='card kpi'+(k.hero?' hero':'');el.style.animationDelay=(i*50)+'ms';
@@ -353,7 +395,7 @@ function renderFunnel(rows){
     ['Approved at gate',rows.filter(r=>!['blocked_triage','timed_out','ceiling_hit','rejected_gate','agent_failed','locked','budget_blocked','blocked_other'].includes(r.outcome)).length],
     ['Validated',rows.filter(r=>PRODUCTIVE.has(r.outcome)||r.outcome==='pr_failed'||r.outcome==='jira_failed').length],
     ['Draft PR created',rows.filter(r=>PRODUCTIVE.has(r.outcome)).length],
-    ['Confirmed merged',rows.filter(r=>r.outcome==='merged').length]];
+    ['Merged',rows.filter(r=>r.outcome==='merged').length]];
   document.getElementById('funnel').innerHTML=st.map((s,i)=>{const pct=n?s[1]/n*100:0;const drop=i?st[i-1][1]-s[1]:0;
     return `<div class="stage"><span>${s[0]}${drop?`<span class="drop">−${drop}</span>`:''}</span><div class="track"><div class="bar" style="width:0" data-w="${pct}"></div></div><span class="n">${s[1]} <span style="color:var(--muted);font-weight:400">${pct.toFixed(0)}%</span></span></div>`}).join('');
   requestAnimationFrame(()=>document.querySelectorAll('.funnel .bar').forEach(b=>b.style.width=b.dataset.w+'%'));
@@ -421,60 +463,91 @@ function renderGuards(rows){
     <div class="kv" style="margin-top:12px"><div class="mini"><div class="l">Cache share of input</div><div class="v">${((t.c/(t.c+t.f||1))*100).toFixed(1)}%</div></div><div class="mini"><div class="l">Saved by caching</div><div class="v" style="color:var(--green)">~${usd(saved)}</div></div></div>`;
 }
 /* ===== Table ===== */
-const COLS=[['key','Ticket'],['project','Project'],['complexity','Complexity'],['tier','Model tier'],['toolCalls','Tool calls'],['credits','Cost'],['outcome','Outcome'],['time','Run at']];
+const COLS=[['key','Ticket'],['complexity','Complexity'],['tier','Model tier'],['lines','Change'],['credits','Cost'],['e2e_s','End-to-end'],['outcome','Outcome'],['prState','PR'],['time','Run at']];
 function renderTable(){
   const rows=filtered().filter(r=>!S.q||[r.key,r.title,r.project,(OUT[r.outcome]||OUT.unknown)[0]].join(' ').toLowerCase().includes(S.q));
-  rows.sort((a,b)=>{const va=a[S.sort],vb=b[S.sort];return (va>vb?1:va<vb?-1:0)*(S.asc?1:-1)});
+  rows.sort((a,b)=>{const va=a[S.sort]??'',vb=b[S.sort]??'';return (va>vb?1:va<vb?-1:0)*(S.asc?1:-1)});
   const mx=Math.max(...rows.map(r=>r.credits),1);
   document.querySelector('#tbl thead').innerHTML='<tr>'+COLS.map(([k,l])=>`<th data-k="${k}" class="${S.sort===k?'sorted'+(S.asc?' asc':''):''}">${l}</th>`).join('')+'</tr>';
   document.querySelectorAll('#tbl th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(S.sort===k)S.asc=!S.asc;else{S.sort=k;S.asc=false}renderTable()});
   const tb=document.querySelector('#tbl tbody');
-  tb.innerHTML=rows.map((r,i)=>`<tr data-i="${DATA.indexOf(r)}"><td class="tk">${r.key}</td><td>${r.project}</td>
-    <td><span class="dot" style="display:inline-block;background:${CXCOL[r.complexity]||'var(--faint)'};margin-right:6px"></span>${r.complexity}</td><td>${r.tier}</td><td>${r.toolCalls||'—'}</td>
+  tb.innerHTML=rows.map((r,i)=>`<tr data-i="${DATA.indexOf(r)}"><td class="tk">${r.key}${(r.members||[]).length?' <span style="color:var(--muted);font-weight:400">+'+r.members.join(', ')+'</span>':''}</td>
+    <td><span class="dot" style="display:inline-block;background:${CXCOL[r.complexity]||'var(--faint)'};margin-right:6px"></span>${r.complexity}</td><td>${r.tier}</td><td>${r.files||r.lines?r.files+' files · '+r.lines+' lines':'—'}</td>
     <td><span class="bar-in" style="width:${r.credits/mx*60}px;background:${PRODUCTIVE.has(r.outcome)?'var(--green)':'var(--red)'}"></span>${usd(r.credits)}</td>
-    <td><span class="pill ${(OUT[r.outcome]||OUT.unknown)[1]}">${(OUT[r.outcome]||OUT.unknown)[0]}</span></td><td style="color:var(--muted)">${new Date(r.time).toLocaleString('en-CA',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</td></tr>`).join('')
-    || '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:30px">No tickets match these filters.</td></tr>';
+    <td>${fmtDur(r.e2e_s)}</td><td><span class="pill ${(OUT[r.outcome]||OUT.unknown)[1]}">${(OUT[r.outcome]||OUT.unknown)[0]}</span></td><td>${r.prUrl?`<a class="prl" href="${r.prUrl}" target="_blank" onclick="event.stopPropagation()">${prPill(r)}</a>`:prPill(r)}</td><td style="color:var(--muted)">${new Date(r.time).toLocaleString('en-CA',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</td></tr>`).join('')
+    || '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:30px">No tickets match these filters.</td></tr>';
   tb.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>openDrawer(DATA[+tr.dataset.i]));
 }
 /* ===== Drill-down drawer ===== */
 function openDrawer(r){
-  const o=r.outcome, productive=PRODUCTIVE.has(o), steps=[
-    ['Claimed from Jira','Labelled ai-locked, moved to In Progress','ok'],
-    ['Localise / triage',o==='blocked_triage'?'Blocked — missing sections, low confidence, or injection risk. No AI spend.':`Confidence ${r.confidence!=null?r.confidence:'n/a'} · complexity ${r.complexity}`,o==='blocked_triage'?'fail':'ok'],
-    ['Agent run (Copilot CLI)',['blocked_triage','locked','budget_blocked'].includes(o)?'Not run':`${r.runs} attempt(s) · ${r.durations.copilot} min · ${usd(r.credits)}${o==='timed_out'?' · TIMED OUT':''}${o==='ceiling_hit'?' · STOPPED AT COST CEILING':''}${o==='agent_failed'?' · FAILED':''}`,['blocked_triage','locked','budget_blocked'].includes(o)?'skip':(o==='timed_out'||o==='ceiling_hit'||o==='agent_failed')?'fail':'ok'],
-    ['Human review gate',r.durations.gate?`Reviewed after ${r.durations.gate} min`:'Not reached',r.durations.gate?(o==='rejected_gate'?'fail':'human'):'skip'],
-    ['Validation (static + Apex)',r.durations.validate?`Validate step ran (${r.durations.validate}s)`:'Not reached',o==='failed_validation'?'fail':r.durations.validate?'ok':'skip'],
-    ['Draft PR + Jira update',productive?'Draft PR opened'+(o==='merged'?', confirmed merged':''):(o==='pr_failed'?'PR creation failed':'Not reached'),productive?'ok':(o==='pr_failed'?'fail':'skip')],
-    ['Human merge → deploy',o==='merged'?'Confirmed merged (per local record)':o==='pr_open'?'PR open — merge/deploy status not tracked locally yet':'Not reached',o==='merged'?'human':'skip']
-  ];
-  const t=r.tokens,tot=t.fresh+t.cached+t.out||1;
+  const o=r.outcome, t=r.tokens, tot=t.fresh+t.cached+t.out||1;
+  const cls={ok:'',failed:'fail',blocked:'wait',skipped:'skip',running:'run'};
+  const human=new Set(['review']);
+  const rows=[];
+  rows.push({t:'Claimed from Jira',m:'Run started · ai-locked, In Progress',start:r.time,end:null,dur:null,c:''});
+  (r.steps||[]).forEach(s=>{
+    const res=s.status==='ok'?'':s.status==='blocked'?(o==='waiting'?' · waiting on open PR (no AI spend)':' · blocked'):s.status==='failed'?' · FAILED':s.status==='running'?' · in progress / no end recorded':'';
+    let m=(s.label.includes('(')?s.label.split('(')[1].replace(')',''):'')+res;
+    if(s.step==='agent_step') m+=` · ${usd(r.credits)}${r.model?' · '+r.model:''}${o==='agent_no_changes'?' · stopped without changes':''}`;
+    if(s.step==='prepare' && r.confidence!=null) m+=` · confidence ${r.confidence} · ${r.complexity}`;
+    rows.push({t:s.label.split(' (')[0],m:m.replace(/^ · /,''),start:s.start,end:s.end,dur:s.dur_s,c:s.status==='ok'&&human.has(s.step)?'human':(cls[s.status]||'')});
+  });
+  if(!(r.steps||[]).length) rows.push({t:'Step timings',m:'Not recorded for this run (older run, or stopped before the first step).',c:'skip'});
+  if(r.prState){
+    rows.push({t:'Pull request',m:r.prState==='merged'?`#${r.prNumber} merged${r.timeToMerge_s!=null?' · '+fmtDur(r.timeToMerge_s)+' after the draft PR':''}`:r.prState==='closed'?`#${r.prNumber} closed without merge`:`${r.prNumber?'#'+r.prNumber+' ':''}open — awaiting review${r.mergeable&&r.mergeable!=='unknown'?' · '+r.mergeable:''}`,
+      start:r.prCreated,end:r.mergedAt||r.closedAt,dur:r.timeToMerge_s,c:r.prState==='merged'?'human':r.prState==='closed'?'fail':'run'});
+    rows.push({t:'Salesforce deploy',m:r.prState==='merged'?'Approve at salesforce-deploy-gate in GitHub Actions — result not tracked yet':'After merge',c:'skip'});
+  }
+  const tl=rows.map(x=>`<div class="s ${x.c}">${x.dur!=null?`<span class="dur">${fmtDur(x.dur)}</span>`:''}<div class="t">${x.t}</div>${x.m?`<div class="m">${x.m}</div>`:''}${x.start||x.end?`<div class="when">${fmtT(x.start)}${x.end?' → '+fmtT(x.end):''}</div>`:''}</div>`).join('');
+  const sumSteps=(r.steps||[]).reduce((a,s)=>a+(s.dur_s||0),0);
   document.getElementById('drawer').innerHTML=`<button class="btn x" onclick="closeDrawer()">✕</button>
-    <div style="color:var(--muted);font-size:12px">${r.project} · ${r.type}</div><h2>${r.key}</h2><div style="font-size:14px">${r.title}</div>
-    <div style="margin-top:10px"><span class="pill ${(OUT[o]||OUT.unknown)[1]}">${(OUT[o]||OUT.unknown)[0]}</span> <span class="pill p-mute">${r.complexity}</span> <span class="pill p-info">${r.tier} tier</span></div>
+    <div style="color:var(--muted);font-size:12px">${r.project} · ${r.type} · run ${r.runId||''}</div><h2>${r.key}${(r.members||[]).length?' <span style="font-size:14px;color:var(--muted)">+ '+r.members.join(', ')+'</span>':''}</h2><div style="font-size:14px">${r.title}</div>
+    <div style="margin-top:10px"><span class="pill ${(OUT[o]||OUT.unknown)[1]}">${(OUT[o]||OUT.unknown)[0]}</span> ${prPill(r)} <span class="pill p-mute">${r.complexity}</span> <span class="pill p-info">${r.tier} tier</span></div>
+    <div class="e2e"><span>End-to-end (claim → ${o==='pr_open'||o==='merged'||o==='pr_rejected'?'draft PR':'stop'})<br><span style="color:var(--muted);font-size:11px">${fmtT(r.time)} → ${fmtT(r.endTime)}</span></span><b>${fmtDur(r.e2e_s)}</b></div>
+    ${r.leadTime_s!=null?`<div class="e2e"><span>Lead time (claim → merged)<br><span style="color:var(--muted);font-size:11px">${fmtT(r.time)} → ${fmtT(r.mergedAt)}</span></span><b>${fmtDur(r.leadTime_s)}</b></div>`:''}
     <div class="kv"><div class="mini"><div class="l">AI cost</div><div class="v">${usd(r.credits)}</div></div><div class="mini"><div class="l">AI credits</div><div class="v">${r.credits.toFixed(3)}</div></div>
-    <div class="mini"><div class="l">Tool calls</div><div class="v">${r.toolCalls||'not logged'}</div></div><div class="mini"><div class="l">Change size</div><div class="v">${r.files||r.lines?r.files+' files · '+r.lines+' lines':'not logged'}</div></div></div>
+    <div class="mini"><div class="l">Change size</div><div class="v">${r.files||r.lines?r.files+' files · '+r.lines+' lines':'not logged'}</div></div><div class="mini"><div class="l">Time in steps</div><div class="v">${fmtDur(sumSteps)}</div></div></div>
+    <h3 style="font-size:13px;margin:18px 0 0">Run timeline</h3>
+    <div class="tl">${tl}</div>
     <h3 style="font-size:13px;margin:18px 0 0">Token breakdown</h3>
     ${tot>1?`<div class="stack"><div style="width:${t.cached/tot*100}%;background:var(--violet)"></div><div style="width:${t.fresh/tot*100}%;background:var(--teal)"></div><div style="width:${t.out/tot*100}%;background:var(--amber)"></div></div>
     <div class="legend" style="margin-top:8px"><span><i style="background:var(--violet)"></i>Cached ${fmtK(t.cached)}</span><span><i style="background:var(--teal)"></i>Fresh ${fmtK(t.fresh)}</span><span><i style="background:var(--amber)"></i>Output ${fmtK(t.out)}</span></div>`:'<div style="color:var(--muted);font-size:12px;margin-top:6px">No usage-file token breakdown found for this run.</div>'}
-    <h3 style="font-size:13px;margin:22px 0 0">Run timeline</h3>
-    <div class="tl">${steps.map(s=>`<div class="s ${s[2]==='fail'?'fail':s[2]==='skip'?'skip':s[2]==='human'?'human':''}"><div class="t">${s[0]}</div><div class="m">${s[1]}</div></div>`).join('')}</div>
-    <div style="color:var(--muted);font-size:11.5px;margin-top:10px">Run started ${new Date(r.time).toLocaleString('en-CA')}.${r.prUrl?` <a href="${r.prUrl}" target="_blank" style="color:var(--teal)">Open PR ↗</a>`:''}</div>`;
+    <div style="color:var(--muted);font-size:11.5px;margin-top:14px">Times are local. Step times come from logs/run-events.jsonl; PR times from GitHub (logs/pr-status.json).${r.prUrl?` <a href="${r.prUrl}" target="_blank" style="color:var(--teal)">Open PR ↗</a>`:''}</div>`;
   document.getElementById('drawer').classList.add('open');document.getElementById('scrim').classList.add('open');
 }
 function closeDrawer(){document.getElementById('drawer').classList.remove('open');document.getElementById('scrim').classList.remove('open')}
 document.getElementById('scrim').onclick=closeDrawer;
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
+/* ===== Where the time goes ===== */
+function renderTime(rows){
+  const ST=[['prepare','Localise & prepare','var(--teal)'],['agent_step','AI agent','var(--violet)'],['review','Human review gate','var(--amber)'],['validate','Validation + Apex','var(--green)'],['pr','Push + draft PR','var(--teal)'],['jira','Jira update','var(--faint)']];
+  const avg={};ST.forEach(([k])=>{const v=[];rows.forEach(r=>(r.steps||[]).forEach(s=>{if(s.step===k&&s.dur_s!=null)v.push(s.dur_s)}));avg[k]=v.length?v.reduce((a,b)=>a+b,0)/v.length:null});
+  const mx=Math.max(...Object.values(avg).filter(x=>x!=null),1);
+  const ttm=median(rows.filter(r=>r.timeToMerge_s!=null).map(r=>r.timeToMerge_s));
+  document.getElementById('timeTotal').textContent='Median end-to-end '+fmtDur(median(rows.filter(r=>PRODUCTIVE.has(r.outcome)).map(r=>r.e2e_s)));
+  document.getElementById('timeBars').innerHTML=ST.map(([k,l,c])=>`<div class="tbar"><span>${l}</span><div class="track"><div class="fill" style="width:${avg[k]!=null?Math.max(2,avg[k]/mx*100):0}%;background:${c}"></div></div><span class="n">${fmtDur(avg[k])}</span></div>`).join('')
+    +`<div class="tbar" style="margin-top:14px"><span><b>Waiting for merge</b></span><div style="color:var(--muted);font-size:11.5px">Draft PR → merged (people), median</div><span class="n">${fmtDur(ttm)}</span></div>`;
+}
+/* ===== Review queue ===== */
+function renderQueue(){
+  const Q=QUEUE||{openPrs:[],waiting:[]};
+  document.getElementById('queueAt').textContent=Q.snapshotAt?'GitHub '+fmtT(Q.snapshotAt):'no GitHub snapshot yet';
+  const ms={clean:['ready','p-ok'],behind:['behind main','p-warn'],dirty:['conflict','p-bad'],blocked:['checks pending','p-info'],unstable:['checks failing','p-bad'],unknown:['checking','p-mute']};
+  const prs=(Q.openPrs||[]).map(p=>{const m=ms[p.mergeable]||ms.unknown;return `<div class="q"><a class="prl" href="${p.url}" target="_blank">#${p.number}</a><span class="k">${(p.keys||[]).join(', ')}</span><span class="m">open ${fmtDur(Math.max(0,p.age_h||0)*3600)}</span><span class="pill ${m[1]}">${m[0]}</span></div>`}).join('')||'<div class="q"><span class="m">No open pipeline PRs.</span></div>';
+  const w=(Q.waiting||[]).map(x=>`<div class="q"><span class="k">${x.key}</span><span class="m">${x.why}</span><span class="pill p-warn">ai-waiting</span></div>`).join('')||'<div class="q"><span class="m">No tickets waiting.</span></div>';
+  document.getElementById('queue').innerHTML=`<div class="qh">Open pull requests</div>${prs}<div class="qh">Waiting tickets</div>${w}`;
+}
 /* ===== CSV export ===== */
 document.getElementById('bExport').onclick=()=>{
-  const rows=filtered();const h=['ticket','project','type','complexity','tier','tool_calls','ai_credits','est_cost_usd','outcome','files','lines','run_at'];
-  const csv=[h.join(',')].concat(rows.map(r=>[r.key,r.project,r.type,r.complexity,r.tier,r.toolCalls,r.credits,(r.credits*CFG.creditUsd).toFixed(4),r.outcome,r.files,r.lines,r.time].join(','))).join('\n');
+  const rows=filtered();const h=['ticket','project','type','complexity','tier','ai_credits','est_cost_usd','outcome','pr_state','pr_number','files','lines','run_start','run_end','end_to_end_s','merged_at','time_to_merge_s','lead_time_s'];
+  const csv=[h.join(',')].concat(rows.map(r=>[r.key,r.project,r.type,r.complexity,r.tier,r.credits,(r.credits*CFG.creditUsd).toFixed(4),r.outcome,r.prState||'',r.prNumber||'',r.files,r.lines,r.time,r.endTime||'',r.e2e_s??'',r.mergedAt||'',r.timeToMerge_s??'',r.leadTime_s??''].join(','))).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='ai-pipeline-tickets.csv';a.click();
 };
 /* ===== Render ===== */
 function render(){
   const rows=filtered();
   renderKPIs(rows);const sp=renderSpend();renderGauge(sp);renderDaily(rows);renderFunnel(rows);
-  renderDonut(rows);renderScatter(rows);renderInsights(rows,sp);renderGuards(rows);renderTable();
+  renderDonut(rows);renderScatter(rows);renderInsights(rows,sp);renderGuards(rows);renderTime(rows);renderQueue();renderTable();
 }
 render();
 </script>
