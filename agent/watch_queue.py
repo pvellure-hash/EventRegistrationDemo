@@ -19,6 +19,12 @@ Every poll cycle, BEFORE claiming a ticket:
                                  v7.1: pr_tracker also writes logs/pr-status.json and the
                                  pipeline dashboard is rebuilt right away, so a merge shows
                                  on the dashboard within one poll.
+                                 v7.2: with DEPLOY_TRACKING_ENABLED=true (default) a merge no
+                                 longer moves the ticket to Done. deploy_tracker.on_merged()
+                                 labels it ai-merged and records the merge; deploy_tracker.track()
+                                 then follows the GitHub Actions deploy run and moves the ticket
+                                 to Done only when the Salesforce deploy SUCCEEDS (ai-deployed),
+                                 or labels ai-deploy-failed and alerts if it fails.
     code_index.build_or_update() PHASE 1: incremental re-index (fast, no AI)
     guards.check_budget()        PHASE 0: monthly budget circuit-breaker
     guards.check_daily_cap()     PHASE 0: daily ticket cap
@@ -44,7 +50,8 @@ STEP 2 continuous mode: after a ticket ends with a PR or "waiting", the watcher 
 .env: WATCH_POLL_INTERVAL_SECONDS=300, WATCH_CONTINUE_SECONDS=5, MONTHLY_BUDGET_USD,
       MAX_TICKETS_PER_DAY, TICKET_CREDIT_CEILING, SF_PACKAGE_DIR, NOTIFY_* (see notify.py),
       PR_REMIND_HOURS, PR_AUTO_UPDATE_BRANCH, OVERLAP_GUARD_ENABLED, JIRA_STATUS_DONE,
-      WATCH_PROGRESS, WATCH_PROGRESS_INTERVAL, COPILOT_CLI_TIMEOUT_MINUTES
+      WATCH_PROGRESS, WATCH_PROGRESS_INTERVAL, COPILOT_CLI_TIMEOUT_MINUTES,
+      DEPLOY_TRACKING_ENABLED, DEPLOY_WORKFLOW, DEPLOY_NO_RUN_HOURS, DEPLOY_TRACK_DAYS
 """
 import os
 import sys
@@ -64,6 +71,7 @@ import pr_tracker
 import update_jira
 import batching
 import progress
+import deploy_tracker
 try:
     import generate_cost_dashboard as dashboard
 except Exception:
@@ -163,7 +171,10 @@ def track_prs():
           f" | new updates: {len(evs)}")
     for ev in evs:
         print(f"  [pr-tracker] {ev['action']:<8} PR #{ev['number']} {','.join(ev['keys'])} {ev.get('detail', '')}")
-        update_jira.on_pr_event(ev)
+        if ev["action"] == "MERGED" and deploy_tracker.ENABLED:
+            deploy_tracker.on_merged(ev)      # v7.2: Done waits for a successful deploy
+        else:
+            update_jira.on_pr_event(ev)
     released = []
     try:
         released = update_jira.release_waiting(open_prs)
@@ -171,7 +182,14 @@ def track_prs():
             print(f"  [pr-tracker] released to ai-ready: {', '.join(released)}")
     except Exception as e:
         print(f"  [pr-tracker] WARNING (non-blocking): release_waiting failed: {e}")
-    refresh_pipeline_dashboard(quiet=not (evs or released))
+    deploy_lines = []
+    try:
+        deploy_lines = deploy_tracker.track(apply=not jc.DRY_RUN)
+        for line in deploy_lines:
+            print(f"  [deploy] {line}")
+    except Exception as e:
+        print(f"  [deploy] WARNING (non-blocking): deploy tracking failed: {e}")
+    refresh_pipeline_dashboard(quiet=not (evs or released or deploy_lines))
 
 
 def run_step(script, step, actor, key):
