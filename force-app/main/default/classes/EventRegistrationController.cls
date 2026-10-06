@@ -41,6 +41,28 @@ public with sharing class EventRegistrationController {
         return reg.Id;
     }
 
+    @AuraEnabled
+    public static void updateRegistration(Id registrationId, String phone,
+                                          Integer numberOfGuests, Date eventDate) {
+        List<String> errors = new List<String>();
+        validateRegistrationDetails(errors, numberOfGuests, eventDate);
+        throwValidationErrors(errors);
+
+        if (!Schema.sObjectType.Event_Registration__c.isUpdateable()
+                || !Schema.sObjectType.Event_Registration__c.fields.Phone__c.isUpdateable()
+                || !Schema.sObjectType.Event_Registration__c.fields.Number_of_Guests__c.isUpdateable()
+                || !Schema.sObjectType.Event_Registration__c.fields.Event_Date__c.isUpdateable()) {
+            throw handledException('You do not have permission to update registration details.');
+        }
+
+        List<Event_Registration__c> registrations = [SELECT Id FROM Event_Registration__c
+            WHERE Id = :registrationId WITH USER_MODE LIMIT 1];
+        if (registrations.isEmpty()) throw handledException('Registration was not found or is not accessible.');
+
+        update new Event_Registration__c(Id = registrations[0].Id, Phone__c = phone,
+            Number_of_Guests__c = numberOfGuests, Event_Date__c = eventDate);
+    }
+
     @AuraEnabled(cacheable=true)
     public static List<Event_Registration__c> getRecentRegistrations() {
         if (!Schema.sObjectType.Event_Registration__c.isAccessible()) {
@@ -68,6 +90,12 @@ public with sharing class EventRegistrationController {
             errors.add('A valid email address is required.');
         }
 
+        validateRegistrationDetails(errors, numberOfGuests, eventDate);
+        throwValidationErrors(errors);
+    }
+
+    private static void validateRegistrationDetails(List<String> errors,
+                                                    Integer numberOfGuests, Date eventDate) {
         if (numberOfGuests == null || numberOfGuests < MIN_GUESTS || numberOfGuests > MAX_GUESTS) {
             errors.add('Number of guests must be between ' + MIN_GUESTS + ' and ' + MAX_GUESTS + '.');
         }
@@ -75,12 +103,18 @@ public with sharing class EventRegistrationController {
         if (eventDate == null || eventDate <= Date.today()) {
             errors.add('Event date must be in the future.');
         }
+    }
 
+    private static void throwValidationErrors(List<String> errors) {
         if (!errors.isEmpty()) {
-			AuraHandledException ex = new AuraHandledException(String.join(errors, ' '));
-			ex.setMessage(String.join(errors, ' '));
-			throw ex;
-		}
+            throw handledException(String.join(errors, ' '));
+        }
+    }
+
+    private static AuraHandledException handledException(String message) {
+        AuraHandledException ex = new AuraHandledException(message);
+        ex.setMessage(message);
+        return ex;
     }
 
     private static Boolean isValidEmail(String email) {
