@@ -16,13 +16,13 @@ Every poll cycle, BEFORE claiming a ticket:
                                  Then release_waiting() returns ai-waiting tickets to
                                  ai-ready when their PR/blocker is gone. Fails open:
                                  a GitHub/Jira hiccup never stops the watcher.
-    code_index.build_or_update() PHASE 1: incremental re-index (fast, no AI) so
-                                 prepare_fix.py's localisation always sees the
-                                 latest merged code, not a stale snapshot.
+                                 v7.1: pr_tracker also writes logs/pr-status.json and the
+                                 pipeline dashboard is rebuilt right away, so a merge shows
+                                 on the dashboard within one poll.
+    code_index.build_or_update() PHASE 1: incremental re-index (fast, no AI)
     guards.check_budget()        PHASE 0: monthly budget circuit-breaker
     guards.check_daily_cap()     PHASE 0: daily ticket cap
-  If either guard blocks, nothing is claimed - tickets stay ai-ready in Jira,
-  so no ticket is left half-processed. One alert per day per reason.
+  If either guard blocks, nothing is claimed - tickets stay ai-ready in Jira.
 Per ticket:
     new run_id (shared with child steps via AGENT_RUN_ID)
     git_sync.sync_base() (G11 self-heal) + preflight.check_git_state()
@@ -33,24 +33,18 @@ Per ticket:
       labelled ai-waiting, $0) - recorded as outcome "waiting", no failure alert.
       STEP 3: prepare_fix may batch related bugs into this run (batching.py). If the run
       does not end with a PR, batching.release_members() returns the other tickets to
-      ai-ready (they are retried on their own) before the repo goes back to main.
-    finally: return_to_base() (G11) - back to main + fast-forward, whether the
-      ticket succeeded or failed, so the NEXT ticket always starts from merged
-      main. Each ticket's branch forks from main independently; an unmerged PR
-      is never carried into the next ticket's branch.
-STEP 2 continuous mode: after a ticket ends with a PR or "waiting", the watcher
-  polls again after WATCH_CONTINUE_SECONDS (default 5) instead of the full
-  interval, so a queue of tickets is worked through back to back. Anything else
-  (blocked, failed, nothing claimed) waits the normal WATCH_POLL_INTERVAL_SECONDS.
-  Every step emits started/ok/failed run events with durations, so the
-  funnel and cycle times are measured without changing the other scripts.
-  The cost dashboard AND the full pipeline command-center dashboard
-  (Phase 2 - generate_pipeline_dashboard.py) are both refreshed after the
-  agent step and at ticket end, so either dashboard reflects every ticket
-  run so far without any manual step.
+      ai-ready before the repo goes back to main.
+      v7.1: each step (except the human review gate) shows a live one-line status in this
+      window - step N of 6, elapsed time against that step's typical time, and for the AI
+      step the files edited / commits made so far (progress.py). WATCH_PROGRESS=false
+      turns it off.
+    finally: back to main + fast-forward (G11), dashboards, re-index.
+STEP 2 continuous mode: after a ticket ends with a PR or "waiting", the watcher polls again
+  after WATCH_CONTINUE_SECONDS (default 5) instead of the full interval.
 .env: WATCH_POLL_INTERVAL_SECONDS=300, WATCH_CONTINUE_SECONDS=5, MONTHLY_BUDGET_USD,
       MAX_TICKETS_PER_DAY, TICKET_CREDIT_CEILING, SF_PACKAGE_DIR, NOTIFY_* (see notify.py),
-      PR_REMIND_HOURS, PR_AUTO_UPDATE_BRANCH, OVERLAP_GUARD_ENABLED, JIRA_STATUS_DONE
+      PR_REMIND_HOURS, PR_AUTO_UPDATE_BRANCH, OVERLAP_GUARD_ENABLED, JIRA_STATUS_DONE,
+      WATCH_PROGRESS, WATCH_PROGRESS_INTERVAL, COPILOT_CLI_TIMEOUT_MINUTES
 """
 import os
 import sys
@@ -69,6 +63,7 @@ import git_sync
 import pr_tracker
 import update_jira
 import batching
+import progress
 try:
     import generate_cost_dashboard as dashboard
 except Exception:
@@ -79,6 +74,7 @@ REPO_ROOT = os.path.abspath(os.path.join(AGENT_DIR, ".."))
 POLL_INTERVAL = int(os.getenv("WATCH_POLL_INTERVAL_SECONDS", "300"))
 CONTINUE_INTERVAL = int(os.getenv("WATCH_CONTINUE_SECONDS", "5"))
 BASE_BRANCH = os.getenv("GITHUB_BASE_BRANCH", "main").strip()
+CLI_TIMEOUT_S = int(os.getenv("COPILOT_CLI_TIMEOUT_MINUTES", "15")) * 60
 EXIT_WAITING = 3   # prepare_fix.py: ticket overlaps an open PR -> ai-waiting
 
 PIPELINE_STEPS = [
@@ -102,6 +98,21 @@ def alert_once_per_day(reason_key, step, reason):
         notify.notify_failure(step=step, ticket="-", reason=redact.redact(reason))
 
 
+def refresh_pipeline_dashboard(quiet=False):
+    """PHASE 2: rebuild the command-center dashboard. Never blocks the loop."""
+    try:
+        r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, "generate_pipeline_dashboard.py")],
+                           cwd=AGENT_DIR, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode == 0:
+            out = r.stdout.strip().splitlines()
+            if out and not quiet:
+                print(f"  {out[-1]}")
+        else:
+            print(f"  [pipeline-dashboard] WARNING (non-blocking): exit {r.returncode}: {r.stderr.strip()[:200]}")
+    except Exception as e:
+        print(f"  [pipeline-dashboard] WARNING (non-blocking): {e}")
+
+
 def refresh_dashboard(key, when=""):
     if dashboard:
         try:
@@ -110,29 +121,11 @@ def refresh_dashboard(key, when=""):
                 print(f"  [dashboard] refreshed ({when}): {stats['n_tickets']} tickets, ${stats['total_cost']:.2f}")
         except Exception as e:
             print(f"  [dashboard] WARNING (non-blocking): {e}")
-    # PHASE 2: full pipeline command-center dashboard, rebuilt from the
-    # real run-events.jsonl (+ per-ticket usage/PR files) every time this
-    # fires - same "never block the loop" principle as the cost dashboard
-    # above, so a dashboard problem can never stop ticket processing.
-    try:
-        r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, "generate_pipeline_dashboard.py")],
-                           cwd=AGENT_DIR, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if r.returncode == 0:
-            out = r.stdout.strip().splitlines()
-            if out:
-                print(f"  {out[-1]}")
-        else:
-            print(f"  [pipeline-dashboard] WARNING (non-blocking): exit {r.returncode}: {r.stderr.strip()[:200]}")
-    except Exception as e:
-        print(f"  [pipeline-dashboard] WARNING (non-blocking): {e}")
+    refresh_pipeline_dashboard()
 
 
 def refresh_index(when=""):
-    """PHASE 1: incremental code-index rebuild. No AI cost - pure parsing.
-    Wrapped so an indexing problem can NEVER block ticket intake; the
-    localizer in prepare_fix.py already degrades to zero confidence (asks
-    for more info) if the index is missing or stale, so failing open here
-    is safe."""
+    """PHASE 1: incremental code-index rebuild. No AI cost. Fails open."""
     try:
         idx = code_index.build_or_update(REPO_ROOT)
         print(f"  [index] refreshed ({when}): {idx['file_count']} files, "
@@ -144,12 +137,7 @@ def refresh_index(when=""):
 
 
 def sync_to_base(key, when):
-    """G11: put the repo back on main at the latest origin/main.
-    Safe by design (git_sync.sync_base): never discards or force-updates anything.
-    If the tree is dirty or local main has diverged it changes NOTHING, reports
-    why, and returns False - the next ticket's re-check will then fail A1/A2/A3
-    and that ticket is skipped with a notification instead of building on a
-    wrong base."""
+    """G11: put the repo back on main at the latest origin/main. Never discards work."""
     try:
         ok, msg = git_sync.sync_base(BASE_BRANCH)
     except Exception as e:
@@ -164,7 +152,8 @@ def sync_to_base(key, when):
 
 
 def track_prs():
-    """STEP 2: follow open PRs and release waiting tickets. No AI, fails open."""
+    """STEP 2: follow open PRs and release waiting tickets. No AI, fails open.
+    v7.1: rebuilds the dashboard after every poll (quietly unless something changed)."""
     try:
         evs, open_prs = pr_tracker.track_all(apply=not jc.DRY_RUN)
     except Exception as e:
@@ -175,27 +164,38 @@ def track_prs():
     for ev in evs:
         print(f"  [pr-tracker] {ev['action']:<8} PR #{ev['number']} {','.join(ev['keys'])} {ev.get('detail', '')}")
         update_jira.on_pr_event(ev)
+    released = []
     try:
         released = update_jira.release_waiting(open_prs)
         if released:
             print(f"  [pr-tracker] released to ai-ready: {', '.join(released)}")
     except Exception as e:
         print(f"  [pr-tracker] WARNING (non-blocking): release_waiting failed: {e}")
+    refresh_pipeline_dashboard(quiet=not (evs or released))
 
 
 def run_step(script, step, actor, key):
-    print(f"\n>>> {script} {key}")
+    names = [s for _, s, _ in PIPELINE_STEPS]
+    index, total = (names.index(step) + 1 if step in names else 0), len(names)
+    print(f"\n>>> [{index}/{total}] {script} {key}")
     events.emit_event(key, step, "started", actor=actor)
     t0 = time.time()
-    r = subprocess.run([sys.executable, os.path.join(AGENT_DIR, script), key], cwd=AGENT_DIR)
-    ok = r.returncode == 0
-    waiting = (script == "prepare_fix.py" and r.returncode == EXIT_WAITING)
+    cmd = [sys.executable, os.path.join(AGENT_DIR, script), key]
+    if progress.ENABLED:
+        rc = progress.run_with_progress(cmd, AGENT_DIR, index, total, step,
+                                        interactive=(actor == "human"), repo_root=REPO_ROOT,
+                                        base=BASE_BRANCH,
+                                        timeout_s=CLI_TIMEOUT_S if step == "agent_step" else None)
+    else:
+        rc = subprocess.run(cmd, cwd=AGENT_DIR).returncode
+    ok = rc == 0
+    waiting = (script == "prepare_fix.py" and rc == EXIT_WAITING)
     events.emit_event(key, step, "ok" if ok else ("blocked" if waiting else "failed"), actor=actor,
                       duration_s=round(time.time() - t0, 1),
-                      reason_code=None if ok else ("open_pr_overlap" if waiting else f"exit_{r.returncode}"))
+                      reason_code=None if ok else ("open_pr_overlap" if waiting else f"exit_{rc}"))
     if script == "invoke_copilot.py":
         refresh_dashboard(key, "after agent")
-    return ok, step, r.returncode
+    return ok, step, rc
 
 
 def claim_next():
@@ -227,9 +227,6 @@ def spending_gates_open():
 
 def resync_before_ticket(key):
     print(f"\n--- Re-checks before {key} ---")
-    # G11 self-heal: normally the previous ticket's finally: already returned
-    # to main; this covers a crash/Ctrl+C between tickets. If it can't sync
-    # safely, check_git_state() below reports exactly why and the ticket skips.
     sync_to_base(key, "before ticket")
     results = preflight.check_git_state() + security_checks.check_salesforce_org()
     for name, passed, detail in results:
@@ -268,7 +265,8 @@ def process_ticket(key):
             jc.audit("watch_queue", key, f"stopped at {script}", "failed")
             notify.notify_failure(step=script, ticket=key, reason=f"{script} exited non-zero")
             return outcome
-        print(f"[{key}] Completed. Draft PR awaiting human review/merge. Moving on to the next ticket.")
+        print(f"[{key}] Completed in {progress.fmt_dur(time.time() - t0)}. "
+              f"Draft PR awaiting human review/merge. Moving on to the next ticket.")
         jc.audit("watch_queue", key, "completed full pipeline", "ok")
         return outcome
     finally:
@@ -281,14 +279,8 @@ def process_ticket(key):
                     print(f"  [batch] released back to ai-ready: {', '.join(released)}")
             except Exception as e:
                 print(f"  [batch] WARNING (non-blocking): could not release batch members: {e}")
-        # G11: always leave the repo on main, success or failure. The fix
-        # branch is already pushed (or, on failure, kept locally for a human).
-        # A dirty tree (e.g. agent crashed mid-edit) is left untouched and
-        # reported - work is never discarded.
         sync_to_base(key, "end of ticket")
         refresh_dashboard(key, "end of ticket")
-        # PHASE 1: re-index AFTER returning to main, so the index reflects
-        # merged code only - not this ticket's unmerged fix branch.
         refresh_index(when="end of ticket")
         os.environ.pop("AGENT_RUN_ID", None)
 
@@ -296,7 +288,6 @@ def process_ticket(key):
 def poll_loop():
     if not jc.ENABLED:
         sys.exit("Agent disabled (AGENT_ENABLED is not 'true'). Stopping.")
-    # G11: recover from a watcher that was stopped mid-ticket on a fix branch.
     sync_to_base("-", "startup")
     print("Running pre-flight and security checks...\n")
     ok1, res1 = preflight.run_all(verbose=True)
@@ -309,9 +300,6 @@ def poll_loop():
         notify.notify_failure(step="preflight", ticket="-", reason=redact.redact(reason))
         sys.exit("\nChecks failed. Fix the items above, then restart watch_queue.py.")
     events.emit_event("-", "startup", "ok")
-    # PHASE 1: build the index once at startup so the very first ticket
-    # claimed already has it available, rather than waiting for the first
-    # poll-cycle refresh below.
     refresh_index(when="startup")
     print(f"\nWatching {jc.PROJECT} for ai-ready tickets every {POLL_INTERVAL}s (Ctrl+C to stop)...")
     print(f"Limits: budget ${guards.MONTHLY_BUDGET_USD:.0f}/month, {guards.MAX_TICKETS_PER_DAY} tickets/day, "
@@ -319,14 +307,14 @@ def poll_loop():
     while True:
         sleep_for = POLL_INTERVAL
         try:
-            track_prs()                        # STEP 2: merged/closed/conflict/behind/reminders + releases
-            refresh_index(when="poll cycle")   # PHASE 1: pick up anything merged since last cycle
+            track_prs()
+            refresh_index(when="poll cycle")
             if spending_gates_open():
                 key = claim_next()
                 if key:
                     outcome = process_ticket(key)
                     if outcome in ("pr_open", "waiting"):
-                        sleep_for = CONTINUE_INTERVAL   # STEP 2: keep going through the queue
+                        sleep_for = CONTINUE_INTERVAL
                 else:
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Nothing claimed. Sleeping {POLL_INTERVAL}s.")
         except Exception as e:

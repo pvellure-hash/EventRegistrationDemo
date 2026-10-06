@@ -20,16 +20,23 @@ Per open or recently closed pipeline PR (head branch fix/<KEY>-... or batch/...,
 
 Only NEW transitions are returned, so each one is reported once. State lives in
 logs/pr-state.json. FIRST RUN (no state file yet): every PR that is already closed is
-recorded silently as done, so old merged PRs (#10..#21) never trigger Jira comments.
+recorded silently as done, so old merged PRs never trigger Jira comments.
+
+v7.1 (dashboard sync): every tracking cycle also writes logs/pr-status.json - a snapshot
+of every ticket PR GitHub returned (number, ticket keys, branch, title, state, created /
+merged / closed times, mergeable state, URL). generate_pipeline_dashboard.py reads it to
+show merged / closed / open status and time-to-merge. It is a read-only copy of what
+GitHub reported; it is rewritten each cycle and safe to delete.
 
 Also owns logs/waiting.json - why a ticket carries the ai-waiting label:
   {"CLAUDE-30": {"kind": "pr", "prs": [18], "detail": "..."}}      overlap with open PR(s)
   {"CLAUDE-31": {"kind": "blocker", "blockers": ["CLAUDE-29"]}}    Jira "is blocked by"
 
 .env:  PR_REMIND_HOURS=4   PR_AUTO_UPDATE_BRANCH=true
-CLI (run from the agent folder, read-only unless --apply):
-  python pr_tracker.py            status table of pipeline PRs
-  python pr_tracker.py --apply    run one tracking cycle (state file + Update branch)
+CLI (run from the agent folder):
+  python pr_tracker.py              status table of pipeline PRs (read-only)
+  python pr_tracker.py --snapshot   also write logs/pr-status.json now (no other changes)
+  python pr_tracker.py --apply      run one tracking cycle (state file + Update branch + snapshot)
 """
 from __future__ import annotations
 
@@ -137,6 +144,35 @@ def _write(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+# ------------------------------------------------------------------ snapshot (v7.1)
+def snapshot_path() -> Path:
+    return STATE_FILE.parent / "pr-status.json"
+
+
+def build_snapshot(prs: list[dict], details: dict | None = None, now: datetime | None = None) -> dict:
+    """prs = GitHub PR summaries; details = {number: detail json} for open PRs (mergeable state)."""
+    details = details or {}
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for p in prs:
+        d = details.get(p["number"], {})
+        state = "merged" if p.get("merged_at") else p.get("state", "open")
+        out.append({
+            "number": p["number"], "keys": ticket_keys(p), "branch": p["head"]["ref"],
+            "title": p.get("title") or "", "state": state, "url": p.get("html_url"),
+            "created_at": p.get("created_at"), "merged_at": p.get("merged_at"),
+            "closed_at": p.get("closed_at"), "draft": bool(p.get("draft")),
+            "mergeable_state": d.get("mergeable_state") or (None if state != "open" else "unknown"),
+        })
+    return {"generated_at": now.isoformat(timespec="seconds"), "prs": out}
+
+
+def write_snapshot(prs: list[dict], details: dict | None = None, now: datetime | None = None) -> Path:
+    path = snapshot_path()
+    _write(path, build_snapshot(prs, details, now))
+    return path
+
+
 def track_all(apply: bool = True, now: datetime | None = None,
               prs: list[dict] | None = None, detail_fn=None) -> tuple[list[dict], set[int]]:
     """Returns (events, open_pr_numbers). events = new transitions for the caller to act on.
@@ -146,7 +182,7 @@ def track_all(apply: bool = True, now: datetime | None = None,
     detail_fn = detail_fn or (lambda n: _gh("GET", f"/pulls/{n}"))
     first_run = not STATE_FILE.exists()
     state = _read(STATE_FILE)
-    events, open_numbers = [], set()
+    events, open_numbers, details = [], set(), {}
     for summary in prs:
         n = str(summary["number"])
         prev = state.get(n, {})
@@ -159,6 +195,8 @@ def track_all(apply: bool = True, now: datetime | None = None,
                         "keys": ticket_keys(summary), "baseline": True}
             continue
         pr = detail_fn(summary["number"]) if summary["state"] == "open" else summary
+        if summary["state"] == "open":
+            details[summary["number"]] = pr
         action = decide(pr, prev, now)
         ev = {"number": pr["number"], "url": pr["html_url"], "branch": pr["head"]["ref"],
               "keys": ticket_keys(pr), "action": action,
@@ -181,6 +219,10 @@ def track_all(apply: bool = True, now: datetime | None = None,
         state[n] = prev
     if apply:
         _write(STATE_FILE, state)
+        try:
+            write_snapshot(prs, details, now)
+        except Exception as e:  # the snapshot is for the dashboard only - never fail tracking
+            print(f"  [pr-tracker] WARNING: could not write pr-status.json: {e}")
     return events, open_numbers
 
 
@@ -203,11 +245,15 @@ def clear_waiting(key: str) -> None:
 
 if __name__ == "__main__":
     apply = "--apply" in sys.argv
+    snap = "--snapshot" in sys.argv
     now = datetime.now(timezone.utc)
     rows = list_pipeline_prs()
+    details = {}
     print(f"{'PR':>4}  {'action':<9} {'merge':<9} {'age h':>6}  keys / branch")
     for s in rows:
         pr = _gh("GET", f"/pulls/{s['number']}") if s["state"] == "open" else s
+        if s["state"] == "open":
+            details[s["number"]] = pr
         print(f"{pr['number']:>4}  {decide(pr, {}, now):<9} {str(pr.get('mergeable_state') or '-'):<9} "
               f"{_hours_since(pr['created_at'], now):>6.1f}  {','.join(ticket_keys(pr))}  {pr['head']['ref']}")
     if not rows:
@@ -218,3 +264,6 @@ if __name__ == "__main__":
         for e in evs:
             print(f"event: {e['action']:<8} PR #{e['number']} {','.join(e['keys'])} {e['detail']}")
         print(f"state saved: {STATE_FILE}")
+        print(f"snapshot saved: {snapshot_path()}")
+    elif snap:
+        print(f"\nsnapshot saved: {write_snapshot(rows, details, now)}")
