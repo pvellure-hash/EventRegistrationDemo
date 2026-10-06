@@ -19,6 +19,10 @@ STEP 2 (v7) - importable handlers used by watch_queue.track_prs() every poll cyc
       waited for is gone: kind "pr" -> none of its PRs is still open; kind "blocker" ->
       every Jira "is blocked by" ticket is Done. A ticket without a record in
       logs/waiting.json is treated as "blocker" (checked against its Jira links).
+STEP 3 (v7): for a batched PR (logs/<LEAD>-pr.json "members"), main() also updates every
+  member ticket: comment with the shared PR link, label ai-pr-created (ai-ready removed),
+  move to In Review. MERGED/REJECTED/CONFLICT events already reach every member because
+  pr_tracker reads all keys from the batch branch name.
 .env: JIRA_STATUS_DONE=Done (if your workflow has no such transition, a WARNING is printed
       and the status is left as is - labels and comments still apply)."""
 import os
@@ -236,6 +240,27 @@ def release_waiting(open_prs):
     return released
 
 
+def update_member(member, lead, pr):
+    """STEP 3: give a batch member the same PR link and status as the lead. Idempotent."""
+    url = pr["pr_url"]
+    print(f"\n  member {member} (fixed together with {lead})")
+    labels = jc.get_issue(member, fields="labels")["fields"].get("labels", [])
+    if already_commented(member, url):
+        print("    PR comment already on ticket - skipping")
+    else:
+        jc.add_comment(member, [
+            f"AI-assisted fix ready for human review - fixed together with {lead} in one pull request.",
+            f"Draft pull request: {url}",
+            f"Branch: {pr['branch']}",
+            f"Details for every ticket are in the Solution Report attached to {lead}.",
+            "No merge or deployment has been performed by the agent."])
+    if DONE_LABEL in labels:
+        print(f"    label {DONE_LABEL} already set - skipping")
+    else:
+        jc.update_labels(member, add=[DONE_LABEL], remove=["ai-ready"])
+    jc.transition(member, jc.STATUS_IN_REVIEW)
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit("Usage: python update_jira.py <TICKET-KEY>")
@@ -263,6 +288,8 @@ def main():
     else:
         jc.update_labels(key, add=[DONE_LABEL], remove=["ai-ready"])
     jc.transition(key, jc.STATUS_IN_REVIEW)
+    for member in pr.get("members") or []:
+        update_member(member, key, pr)
     print("\n" + "-" * 60)
     print(f"Jira {key} updated. Waiting for human PR review.")
     if jc.DRY_RUN:
