@@ -6,6 +6,9 @@ Rebuilds the AI Delivery Command Center dashboard from REAL pipeline telemetry:
   logs/pr-status.json           v7.1: GitHub snapshot written by pr_tracker.py every poll
                                 (merged / closed / open, created / merged / closed times)
   logs/waiting.json             v7.1: why ai-waiting tickets are waiting
+  logs/deploy-state.json        v7.2: Salesforce deploy per merged PR (deploy_tracker.py):
+                                awaiting approval / deploying / deployed / failed, run link,
+                                approval wait and deploy duration
 It re-reads everything and rewrites logs/pipeline-dashboard.html from scratch on every run,
 so it accumulates automatically as the logs grow. watch_queue.py calls it after the agent
 step, at the end of every ticket, and after every poll that saw a PR change.
@@ -39,6 +42,7 @@ TEMPLATE_PATH = os.path.join(HERE, "dashboard_template.html")
 OUTPUT_PATH = os.path.join(LOGS_DIR, "pipeline-dashboard.html")
 PR_STATUS_PATH = os.path.join(LOGS_DIR, "pr-status.json")
 WAITING_PATH = os.path.join(LOGS_DIR, "waiting.json")
+DEPLOY_PATH = os.path.join(LOGS_DIR, "deploy-state.json")
 
 TIER_BY_COMPLEXITY = {"simple": "Economy", "moderate": "Standard", "complex": "Premium"}
 # Steps the watcher runs, in order (watch_queue.PIPELINE_STEPS) and their display labels.
@@ -186,8 +190,13 @@ def run_outcome(evs):
     return "unknown"
 
 
-def build_ticket_records(events, pr_index=None):
+def load_deploy_index():
+    return load_json_if_exists(DEPLOY_PATH) or {}
+
+
+def build_ticket_records(events, pr_index=None, deploy_index=None):
     pr_index = pr_index if pr_index is not None else load_pr_index()[0]
+    deploy_index = deploy_index if deploy_index is not None else load_deploy_index()
     groups, order = {}, []
     for e in events:
         run_id, ticket = e.get("run_id"), e.get("ticket")
@@ -278,6 +287,20 @@ def build_ticket_records(events, pr_index=None):
                     outcome = "pr_rejected"
             else:
                 pr_state = "open"
+        # v7.2: Salesforce deploy for this PR (deploy_tracker.py)
+        dep = deploy_index.get(str(pr_number)) if pr_number else None
+        deploy = None
+        if dep and outcome == "merged":
+            ds = dep.get("state")
+            deploy = {"state": ds, "url": dep.get("run_url"), "created": dep.get("run_created"),
+                      "started": dep.get("job_started"), "completed": dep.get("job_completed"),
+                      "approvalWait_s": dep.get("approval_wait_s"), "deploy_s": dep.get("deploy_s"),
+                      "deployedAt": dep.get("deployed_at"), "note": dep.get("note"),
+                      "conclusion": dep.get("run_conclusion")}
+            if ds == "deployed":
+                outcome = "deployed"
+            elif ds == "failed":
+                outcome = "deploy_failed"
         t_merged = parse_time(merged_at)
         pr_ready = parse_time(next((s["end"] for s in steps if s["step"] == "pr" and s["status"] == "ok"), None)) \
             or parse_time(pr_created)
@@ -295,7 +318,9 @@ def build_ticket_records(events, pr_index=None):
             "steps": steps, "apex": {"run": 0}, "prUrl": pr_url, "prNumber": pr_number, "prState": pr_state,
             "prCreated": pr_created, "mergedAt": merged_at, "closedAt": closed_at, "mergeable": mergeable,
             "timeToMerge_s": secs(pr_ready, t_merged), "leadTime_s": secs(t_start, t_merged),
-            "members": members,
+            "members": members, "deploy": deploy,
+            "mergeToDeploy_s": secs(t_merged, parse_time((deploy or {}).get("deployedAt"))) if deploy else None,
+            "leadTimeDeployed_s": secs(t_start, parse_time((deploy or {}).get("deployedAt"))) if deploy else None,
         })
     return records
 
@@ -318,7 +343,15 @@ def build_queue(pr_snap):
         else:
             why = "Blocked by " + ", ".join(w.get("blockers", []))
         waiting.append({"key": k, "why": why, "since": w.get("since")})
+    deploys = []
+    for d in (load_json_if_exists(DEPLOY_PATH) or {}).values():
+        if d.get("state") in ("pending", "awaiting_approval", "deploying", "failed", "no_run"):
+            c = parse_time(d.get("run_created") or d.get("merged_at"))
+            deploys.append({"pr": d.get("pr"), "keys": d.get("keys", []), "state": d.get("state"),
+                            "url": d.get("run_url") or d.get("pr_url"),
+                            "age_h": max(0.0, round((now - c).total_seconds() / 3600, 1)) if c else None})
     return {"openPrs": sorted(open_prs, key=lambda p: -(p["age_h"] or 0)), "waiting": waiting,
+            "deploys": sorted(deploys, key=lambda d: -(d["age_h"] or 0)),
             "snapshotAt": (pr_snap or {}).get("generated_at")}
 
 
@@ -347,8 +380,9 @@ def main():
     pr_index, snap = load_pr_index()
     records = build_ticket_records(load_events(), pr_index)
     out = render(records, build_queue(snap))
-    merged = sum(1 for r in records if r["outcome"] == "merged")
-    print(f"[dashboard] rebuilt from {len(records)} ticket run(s), {merged} merged -> {out}")
+    merged = sum(1 for r in records if r["outcome"] in ("merged", "deployed", "deploy_failed"))
+    deployed = sum(1 for r in records if r["outcome"] == "deployed")
+    print(f"[dashboard] rebuilt from {len(records)} ticket run(s), {merged} merged, {deployed} deployed -> {out}")
 
 
 if __name__ == "__main__":

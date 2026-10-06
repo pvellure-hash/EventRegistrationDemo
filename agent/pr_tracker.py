@@ -163,6 +163,7 @@ def build_snapshot(prs: list[dict], details: dict | None = None, now: datetime |
             "created_at": p.get("created_at"), "merged_at": p.get("merged_at"),
             "closed_at": p.get("closed_at"), "draft": bool(p.get("draft")),
             "mergeable_state": d.get("mergeable_state") or (None if state != "open" else "unknown"),
+            "merge_sha": p.get("merge_commit_sha") if state == "merged" else None,
         })
     return {"generated_at": now.isoformat(timespec="seconds"), "prs": out}
 
@@ -200,6 +201,7 @@ def track_all(apply: bool = True, now: datetime | None = None,
         action = decide(pr, prev, now)
         ev = {"number": pr["number"], "url": pr["html_url"], "branch": pr["head"]["ref"],
               "keys": ticket_keys(pr), "action": action,
+              "merge_sha": pr.get("merge_commit_sha"), "merged_at": pr.get("merged_at"),
               "age_h": round(_hours_since(pr["created_at"], now), 1), "detail": ""}
         if action == "UPDATE":
             if apply:

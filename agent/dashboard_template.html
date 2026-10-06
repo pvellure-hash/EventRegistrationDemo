@@ -209,7 +209,7 @@ footer{color:var(--muted);font-size:11.5px;text-align:center;margin-top:28px;lin
       <div id="timeBars"></div>
     </div>
     <div class="card">
-      <div class="hd"><div><h3>Review queue</h3><p>Open pull requests and tickets waiting on them (from GitHub, refreshed every poll)</p></div><span class="pill p-mute" id="queueAt"></span></div>
+      <div class="hd"><div><h3>Review queue</h3><p>Open pull requests, deploys not yet live, and tickets waiting (from GitHub, refreshed every poll)</p></div><span class="pill p-mute" id="queueAt"></span></div>
       <div id="queue"></div>
     </div>
   </section>
@@ -252,7 +252,7 @@ if(window.__PIPELINE_DATA__ && window.__PIPELINE_DATA__.length) document.getElem
 // validate->failed_validation, pr->pr_failed, jira->jira_failed. Extended here so no
 // outcome value the generator can emit is ever missing from this lookup (an unmapped
 // key would otherwise throw when the table/drawer try to render it).
-const OUT={merged:['Merged','p-ok','var(--green)'],pr_open:['PR open — awaiting review','p-info','var(--teal)'],
+const OUT={deployed:['Deployed to Salesforce','p-ok','var(--green)'],deploy_failed:['Merged — deploy failed','p-bad','var(--red)'],merged:['Merged','p-ok','var(--green)'],pr_open:['PR open — awaiting review','p-info','var(--teal)'],
   pr_rejected:['PR closed without merge','p-warn','var(--amber)'],
   waiting:['Waiting on open PR / blocker','p-mute','var(--amber)'],
   agent_no_changes:['Agent stopped — no changes','p-bad','var(--red)'],
@@ -265,7 +265,10 @@ const OUT={merged:['Merged','p-ok','var(--green)'],pr_open:['PR open — awaitin
   jira_failed:['Jira update failed','p-warn','var(--amber)'],locked:['Skipped (duplicate run lock)','p-mute','var(--muted)'],
   budget_blocked:['Blocked - monthly budget reached','p-mute','var(--muted)'],
   blocked_other:['Blocked (guard)','p-mute','var(--muted)'],unknown:['Unknown / in progress','p-mute','var(--muted)']};
-const PRODUCTIVE=new Set(['merged','pr_open','pr_rejected']);
+const PRODUCTIVE=new Set(['deployed','deploy_failed','merged','pr_open','pr_rejected']);
+const MERGED=new Set(['deployed','deploy_failed','merged']);
+const DEP={deployed:['deployed','p-ok'],failed:['deploy failed','p-bad'],awaiting_approval:['awaiting approval','p-warn'],deploying:['deploying','p-info'],pending:['deploy pending','p-mute'],no_run:['no deploy run','p-warn']};
+const depPill=r=>{const d=r.deploy;if(!d||!DEP[d.state])return '';const x=DEP[d.state];return ` <span class="pill ${x[1]}">${x[0]}</span>`};
 const fmtDur=s=>{if(s==null||isNaN(s))return '—';s=Math.round(s);if(s<60)return s+'s';const m=Math.floor(s/60),r=s%60;if(m<60)return m+'m '+String(r).padStart(2,'0')+'s';const h=Math.floor(m/60),mm=m%60;if(h<48)return h+'h '+String(mm).padStart(2,'0')+'m';return Math.floor(h/24)+'d '+(h%24)+'h'};
 const fmtT=t=>t?new Date(t).toLocaleString('en-CA',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit'}):'—';
 const median=a=>{const v=a.filter(x=>x!=null&&!isNaN(x)).sort((x,y)=>x-y);if(!v.length)return null;const m=Math.floor(v.length/2);return v.length%2?v[m]:(v[m-1]+v[m])/2};
@@ -304,7 +307,7 @@ function spark(svg,vals,color){const w=300,h=46;svg.setAttribute('viewBox',`0 0 
   E('polygon',{points:`0,${h} ${p} ${w},${h}`,fill:color,opacity:.12},svg);E('polyline',{points:p,fill:'none',stroke:color,'stroke-width':1.6,opacity:.8},svg)}
 function dailySeries(rows,fn,days=14){const out=[];for(let i=days-1;i>=0;i--){const d=day(new Date(CFG.now.getTime()-i*864e5));out.push(fn(rows.filter(r=>day(r.time)===d)))}return out}
 function renderKPIs(rows){
-  const all=rows, credits=all.reduce((s,r)=>s+r.credits,0), merged=all.filter(r=>r.outcome==='merged'), prod=all.filter(r=>PRODUCTIVE.has(r.outcome));
+  const all=rows, credits=all.reduce((s,r)=>s+r.credits,0), merged=all.filter(r=>MERGED.has(r.outcome)), prod=all.filter(r=>PRODUCTIVE.has(r.outcome));
   const wasted=all.filter(r=>!PRODUCTIVE.has(r.outcome)).reduce((s,r)=>s+r.credits,0);
   const tok=all.reduce((a,r)=>({c:a.c+r.tokens.cached,i:a.i+r.tokens.cached+r.tokens.fresh}),{c:0,i:0});
   const cpf=prod.length?credits/prod.length:0;
@@ -312,7 +315,7 @@ function renderKPIs(rows){
   const K=[
     {l:'Cost per delivered fix',v:usd(cpf),s:`${prod.length} PRs from ${all.length} ticket run(s)`,hero:1,sp:dailySeries(all,r=>r.reduce((s,x)=>s+x.credits,0)/(r.filter(x=>PRODUCTIVE.has(x.outcome)).length||1)),c:'#86BC25'},
     {l:'Total AI spend',v:usd(credits),s:`${credits.toFixed(2)} AI credits · ${S.range?'last '+S.range+' days':'all time'}`,sp:dailySeries(all,r=>r.reduce((s,x)=>s+x.credits,0)),c:'#22b8cf'},
-    {l:'PRs opened',v:prod.length,s:`${merged.length} merged · ${all.filter(r=>r.outcome==='pr_open').length} open · ${all.filter(r=>r.outcome==='pr_rejected').length} closed`,sp:dailySeries(all,r=>r.filter(x=>PRODUCTIVE.has(x.outcome)).length),c:'#86BC25'},
+    {l:'PRs opened',v:prod.length,s:`${all.filter(r=>r.outcome==='deployed').length} deployed · ${merged.length} merged · ${all.filter(r=>r.outcome==='pr_open').length} open · ${all.filter(r=>r.outcome==='pr_rejected').length} closed`,sp:dailySeries(all,r=>r.filter(x=>PRODUCTIVE.has(x.outcome)).length),c:'#86BC25'},
     {l:'Wasted spend',v:(credits?wasted/credits*100:0).toFixed(1)+'%',s:`${usd(wasted)} on runs with no PR`,bad:1,sp:dailySeries(all,r=>r.filter(x=>!PRODUCTIVE.has(x.outcome)).reduce((s,x)=>s+x.credits,0)),c:'#ff5d62'},
     {l:'Prompt cache hit',v:(tok.i?tok.c/tok.i*100:0).toFixed(1)+'%',s:'Cached input billed at ~10%',sp:dailySeries(all,r=>{const i=r.reduce((s,x)=>s+x.tokens.cached+x.tokens.fresh,0);return i?r.reduce((s,x)=>s+x.tokens.cached,0)/i:0}),c:'#8b7cf6'},
     {l:'End-to-end time',v:fmtDur(e2eMed),s:`Median claim → draft PR · merge ${ttmMed!=null?'+'+fmtDur(ttmMed):'n/a'}`,sp:dailySeries(prod,r=>r.length?r.reduce((s,x)=>s+(x.e2e_s||0),0)/r.length:0),c:'#f5a623'},
@@ -395,7 +398,8 @@ function renderFunnel(rows){
     ['Approved at gate',rows.filter(r=>!['blocked_triage','timed_out','ceiling_hit','rejected_gate','agent_failed','locked','budget_blocked','blocked_other'].includes(r.outcome)).length],
     ['Validated',rows.filter(r=>PRODUCTIVE.has(r.outcome)||r.outcome==='pr_failed'||r.outcome==='jira_failed').length],
     ['Draft PR created',rows.filter(r=>PRODUCTIVE.has(r.outcome)).length],
-    ['Merged',rows.filter(r=>r.outcome==='merged').length]];
+    ['Merged',rows.filter(r=>MERGED.has(r.outcome)).length],
+    ['Deployed to Salesforce',rows.filter(r=>r.outcome==='deployed').length]];
   document.getElementById('funnel').innerHTML=st.map((s,i)=>{const pct=n?s[1]/n*100:0;const drop=i?st[i-1][1]-s[1]:0;
     return `<div class="stage"><span>${s[0]}${drop?`<span class="drop">−${drop}</span>`:''}</span><div class="track"><div class="bar" style="width:0" data-w="${pct}"></div></div><span class="n">${s[1]} <span style="color:var(--muted);font-weight:400">${pct.toFixed(0)}%</span></span></div>`}).join('');
   requestAnimationFrame(()=>document.querySelectorAll('.funnel .bar').forEach(b=>b.style.width=b.dataset.w+'%'));
@@ -453,7 +457,7 @@ function renderGuards(rows){
   const G=[['Production-org guard (sandbox only)','ok','Active'],['Branch protection / merge-gate on main','ok','Verified (R8)'],['GitHub token scope audit','ok','Least-privilege'],
     ['Per-ticket cost ceiling',  'ok',CFG.perTicketCeilingCredits+' credits'],['Monthly budget circuit-breaker','ok','$'+CFG.monthlyBudgetUsd],
     ['Duplicate-run lock','ok','Active'],['Secret redaction in logs/alerts','ok','Active'],['Prompt-injection scan (ticket + code)','warn','Ticket only'],
-    ['Agent tool deny-list (push/gh/deploy)','ok','Enforced'],['Salesforce deploy approval gate','ok','Required reviewer (R8)']];
+    ['Agent tool deny-list (push/gh/deploy)','ok','Enforced'],['Salesforce deploy approval gate','ok','Required reviewer (R8)'],['Deploy result tracked; Done only after success','ok','v7.2']];
   const ok=G.filter(g=>g[1]==='ok').length;document.getElementById('guardScore').textContent=`${ok}/${G.length} green`;
   document.getElementById('guards').innerHTML=G.map(g=>`<div class="g"><span class="dot" style="background:${g[1]==='ok'?'var(--green)':'var(--amber)'}"></span><span style="flex:1">${g[0]}</span><span class="pill ${g[1]==='ok'?'p-ok':'p-warn'}">${g[2]}</span></div>`).join('');
   const t=rows.reduce((a,r)=>({f:a.f+r.tokens.fresh,c:a.c+r.tokens.cached,o:a.o+r.tokens.out}),{f:0,c:0,o:0}),tot=t.f+t.c+t.o||1;
@@ -463,7 +467,7 @@ function renderGuards(rows){
     <div class="kv" style="margin-top:12px"><div class="mini"><div class="l">Cache share of input</div><div class="v">${((t.c/(t.c+t.f||1))*100).toFixed(1)}%</div></div><div class="mini"><div class="l">Saved by caching</div><div class="v" style="color:var(--green)">~${usd(saved)}</div></div></div>`;
 }
 /* ===== Table ===== */
-const COLS=[['key','Ticket'],['complexity','Complexity'],['tier','Model tier'],['lines','Change'],['credits','Cost'],['e2e_s','End-to-end'],['outcome','Outcome'],['prState','PR'],['time','Run at']];
+const COLS=[['key','Ticket'],['complexity','Complexity'],['tier','Model tier'],['lines','Change'],['credits','Cost'],['e2e_s','End-to-end'],['outcome','Outcome'],['prState','PR / deploy'],['time','Run at']];
 function renderTable(){
   const rows=filtered().filter(r=>!S.q||[r.key,r.title,r.project,(OUT[r.outcome]||OUT.unknown)[0]].join(' ').toLowerCase().includes(S.q));
   rows.sort((a,b)=>{const va=a[S.sort]??'',vb=b[S.sort]??'';return (va>vb?1:va<vb?-1:0)*(S.asc?1:-1)});
@@ -474,7 +478,7 @@ function renderTable(){
   tb.innerHTML=rows.map((r,i)=>`<tr data-i="${DATA.indexOf(r)}"><td class="tk">${r.key}${(r.members||[]).length?' <span style="color:var(--muted);font-weight:400">+'+r.members.join(', ')+'</span>':''}</td>
     <td><span class="dot" style="display:inline-block;background:${CXCOL[r.complexity]||'var(--faint)'};margin-right:6px"></span>${r.complexity}</td><td>${r.tier}</td><td>${r.files||r.lines?r.files+' files · '+r.lines+' lines':'—'}</td>
     <td><span class="bar-in" style="width:${r.credits/mx*60}px;background:${PRODUCTIVE.has(r.outcome)?'var(--green)':'var(--red)'}"></span>${usd(r.credits)}</td>
-    <td>${fmtDur(r.e2e_s)}</td><td><span class="pill ${(OUT[r.outcome]||OUT.unknown)[1]}">${(OUT[r.outcome]||OUT.unknown)[0]}</span></td><td>${r.prUrl?`<a class="prl" href="${r.prUrl}" target="_blank" onclick="event.stopPropagation()">${prPill(r)}</a>`:prPill(r)}</td><td style="color:var(--muted)">${new Date(r.time).toLocaleString('en-CA',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</td></tr>`).join('')
+    <td>${fmtDur(r.e2e_s)}</td><td><span class="pill ${(OUT[r.outcome]||OUT.unknown)[1]}">${(OUT[r.outcome]||OUT.unknown)[0]}</span></td><td>${r.prUrl?`<a class="prl" href="${r.prUrl}" target="_blank" onclick="event.stopPropagation()">${prPill(r)}</a>`:prPill(r)}${depPill(r)}</td><td style="color:var(--muted)">${new Date(r.time).toLocaleString('en-CA',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</td></tr>`).join('')
     || '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:30px">No tickets match these filters.</td></tr>';
   tb.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>openDrawer(DATA[+tr.dataset.i]));
 }
@@ -496,14 +500,24 @@ function openDrawer(r){
   if(r.prState){
     rows.push({t:'Pull request',m:r.prState==='merged'?`#${r.prNumber} merged${r.timeToMerge_s!=null?' · '+fmtDur(r.timeToMerge_s)+' after the draft PR':''}`:r.prState==='closed'?`#${r.prNumber} closed without merge`:`${r.prNumber?'#'+r.prNumber+' ':''}open — awaiting review${r.mergeable&&r.mergeable!=='unknown'?' · '+r.mergeable:''}`,
       start:r.prCreated,end:r.mergedAt||r.closedAt,dur:r.timeToMerge_s,c:r.prState==='merged'?'human':r.prState==='closed'?'fail':'run'});
-    rows.push({t:'Salesforce deploy',m:r.prState==='merged'?'Approve at salesforce-deploy-gate in GitHub Actions — result not tracked yet':'After merge',c:'skip'});
+    const d=r.deploy;
+    if(d){
+      const lab={deployed:'Deployed to the org'+(d.note?' — '+d.note:''),failed:'FAILED ('+(d.conclusion||'failure')+') — nothing went live; see the run summary',awaiting_approval:'Waiting for approval at salesforce-deploy-gate',deploying:'Deploying (RunLocalTests)',pending:'Waiting for the GitHub Actions run to start',no_run:'No deploy run found for this merge — check GitHub Actions'}[d.state]||d.state;
+      const extra=(d.approvalWait_s!=null?' · approval wait '+fmtDur(d.approvalWait_s):'')+(d.deploy_s!=null?' · deploy '+fmtDur(d.deploy_s):'');
+      rows.push({t:'Salesforce deploy',m:lab+extra+(d.url?` · <a href="${d.url}" target="_blank" style="color:var(--teal)">run ↗</a>`:''),start:d.created,end:d.completed,
+        dur:(d.created&&d.completed)?(new Date(d.completed)-new Date(d.created))/1000:null,c:d.state==='deployed'?'':d.state==='failed'?'fail':d.state==='awaiting_approval'?'wait':'run'});
+      if(d.state==='deployed') rows.push({t:'Jira → Done',m:'Moved to Done automatically after the successful deploy',c:''});
+    } else {
+      rows.push({t:'Salesforce deploy',m:r.prState==='merged'?'Not tracked for this PR (merged before deploy tracking, or tracking off)':'After merge',c:'skip'});
+    }
   }
   const tl=rows.map(x=>`<div class="s ${x.c}">${x.dur!=null?`<span class="dur">${fmtDur(x.dur)}</span>`:''}<div class="t">${x.t}</div>${x.m?`<div class="m">${x.m}</div>`:''}${x.start||x.end?`<div class="when">${fmtT(x.start)}${x.end?' → '+fmtT(x.end):''}</div>`:''}</div>`).join('');
   const sumSteps=(r.steps||[]).reduce((a,s)=>a+(s.dur_s||0),0);
   document.getElementById('drawer').innerHTML=`<button class="btn x" onclick="closeDrawer()">✕</button>
     <div style="color:var(--muted);font-size:12px">${r.project} · ${r.type} · run ${r.runId||''}</div><h2>${r.key}${(r.members||[]).length?' <span style="font-size:14px;color:var(--muted)">+ '+r.members.join(', ')+'</span>':''}</h2><div style="font-size:14px">${r.title}</div>
-    <div style="margin-top:10px"><span class="pill ${(OUT[o]||OUT.unknown)[1]}">${(OUT[o]||OUT.unknown)[0]}</span> ${prPill(r)} <span class="pill p-mute">${r.complexity}</span> <span class="pill p-info">${r.tier} tier</span></div>
-    <div class="e2e"><span>End-to-end (claim → ${o==='pr_open'||o==='merged'||o==='pr_rejected'?'draft PR':'stop'})<br><span style="color:var(--muted);font-size:11px">${fmtT(r.time)} → ${fmtT(r.endTime)}</span></span><b>${fmtDur(r.e2e_s)}</b></div>
+    <div style="margin-top:10px"><span class="pill ${(OUT[o]||OUT.unknown)[1]}">${(OUT[o]||OUT.unknown)[0]}</span> ${prPill(r)}${depPill(r)} <span class="pill p-mute">${r.complexity}</span> <span class="pill p-info">${r.tier} tier</span></div>
+    <div class="e2e"><span>End-to-end (claim → ${PRODUCTIVE.has(o)?'draft PR':'stop'})<br><span style="color:var(--muted);font-size:11px">${fmtT(r.time)} → ${fmtT(r.endTime)}</span></span><b>${fmtDur(r.e2e_s)}</b></div>
+    ${r.leadTimeDeployed_s!=null?`<div class="e2e"><span>Lead time (claim → live in Salesforce)<br><span style="color:var(--muted);font-size:11px">${fmtT(r.time)} → ${fmtT(r.deploy.deployedAt)}</span></span><b>${fmtDur(r.leadTimeDeployed_s)}</b></div>`:''}
     ${r.leadTime_s!=null?`<div class="e2e"><span>Lead time (claim → merged)<br><span style="color:var(--muted);font-size:11px">${fmtT(r.time)} → ${fmtT(r.mergedAt)}</span></span><b>${fmtDur(r.leadTime_s)}</b></div>`:''}
     <div class="kv"><div class="mini"><div class="l">AI cost</div><div class="v">${usd(r.credits)}</div></div><div class="mini"><div class="l">AI credits</div><div class="v">${r.credits.toFixed(3)}</div></div>
     <div class="mini"><div class="l">Change size</div><div class="v">${r.files||r.lines?r.files+' files · '+r.lines+' lines':'not logged'}</div></div><div class="mini"><div class="l">Time in steps</div><div class="v">${fmtDur(sumSteps)}</div></div></div>
@@ -526,7 +540,8 @@ function renderTime(rows){
   const ttm=median(rows.filter(r=>r.timeToMerge_s!=null).map(r=>r.timeToMerge_s));
   document.getElementById('timeTotal').textContent='Median end-to-end '+fmtDur(median(rows.filter(r=>PRODUCTIVE.has(r.outcome)).map(r=>r.e2e_s)));
   document.getElementById('timeBars').innerHTML=ST.map(([k,l,c])=>`<div class="tbar"><span>${l}</span><div class="track"><div class="fill" style="width:${avg[k]!=null?Math.max(2,avg[k]/mx*100):0}%;background:${c}"></div></div><span class="n">${fmtDur(avg[k])}</span></div>`).join('')
-    +`<div class="tbar" style="margin-top:14px"><span><b>Waiting for merge</b></span><div style="color:var(--muted);font-size:11.5px">Draft PR → merged (people), median</div><span class="n">${fmtDur(ttm)}</span></div>`;
+    +`<div class="tbar" style="margin-top:14px"><span><b>Waiting for merge</b></span><div style="color:var(--muted);font-size:11.5px">Draft PR → merged (people), median</div><span class="n">${fmtDur(ttm)}</span></div>`
+    +`<div class="tbar"><span><b>Merge → live</b></span><div style="color:var(--muted);font-size:11.5px">Deploy approval wait ${fmtDur(median(rows.filter(r=>r.deploy&&r.deploy.approvalWait_s!=null).map(r=>r.deploy.approvalWait_s)))} + deploy ${fmtDur(median(rows.filter(r=>r.deploy&&r.deploy.deploy_s!=null).map(r=>r.deploy.deploy_s)))}, median</div><span class="n">${fmtDur(median(rows.filter(r=>r.mergeToDeploy_s!=null).map(r=>r.mergeToDeploy_s)))}</span></div>`;
 }
 /* ===== Review queue ===== */
 function renderQueue(){
@@ -535,12 +550,13 @@ function renderQueue(){
   const ms={clean:['ready','p-ok'],behind:['behind main','p-warn'],dirty:['conflict','p-bad'],blocked:['checks pending','p-info'],unstable:['checks failing','p-bad'],unknown:['checking','p-mute']};
   const prs=(Q.openPrs||[]).map(p=>{const m=ms[p.mergeable]||ms.unknown;return `<div class="q"><a class="prl" href="${p.url}" target="_blank">#${p.number}</a><span class="k">${(p.keys||[]).join(', ')}</span><span class="m">open ${fmtDur(Math.max(0,p.age_h||0)*3600)}</span><span class="pill ${m[1]}">${m[0]}</span></div>`}).join('')||'<div class="q"><span class="m">No open pipeline PRs.</span></div>';
   const w=(Q.waiting||[]).map(x=>`<div class="q"><span class="k">${x.key}</span><span class="m">${x.why}</span><span class="pill p-warn">ai-waiting</span></div>`).join('')||'<div class="q"><span class="m">No tickets waiting.</span></div>';
-  document.getElementById('queue').innerHTML=`<div class="qh">Open pull requests</div>${prs}<div class="qh">Waiting tickets</div>${w}`;
+  const dl=(Q.deploys||[]).map(x=>{const m=DEP[x.state]||['?','p-mute'];return `<div class="q"><a class="prl" href="${x.url||'#'}" target="_blank">#${x.pr}</a><span class="k">${(x.keys||[]).join(', ')}</span><span class="m">merged ${fmtDur(Math.max(0,x.age_h||0)*3600)} ago</span><span class="pill ${m[1]}">${m[0]}</span></div>`}).join('')||'<div class="q"><span class="m">No deploys waiting.</span></div>';
+  document.getElementById('queue').innerHTML=`<div class="qh">Open pull requests</div>${prs}<div class="qh">Salesforce deploys (merged, not yet live)</div>${dl}<div class="qh">Waiting tickets</div>${w}`;
 }
 /* ===== CSV export ===== */
 document.getElementById('bExport').onclick=()=>{
-  const rows=filtered();const h=['ticket','project','type','complexity','tier','ai_credits','est_cost_usd','outcome','pr_state','pr_number','files','lines','run_start','run_end','end_to_end_s','merged_at','time_to_merge_s','lead_time_s'];
-  const csv=[h.join(',')].concat(rows.map(r=>[r.key,r.project,r.type,r.complexity,r.tier,r.credits,(r.credits*CFG.creditUsd).toFixed(4),r.outcome,r.prState||'',r.prNumber||'',r.files,r.lines,r.time,r.endTime||'',r.e2e_s??'',r.mergedAt||'',r.timeToMerge_s??'',r.leadTime_s??''].join(','))).join('\n');
+  const rows=filtered();const h=['ticket','project','type','complexity','tier','ai_credits','est_cost_usd','outcome','pr_state','pr_number','files','lines','run_start','run_end','end_to_end_s','merged_at','time_to_merge_s','lead_time_s','deploy_state','deployed_at','merge_to_deploy_s','deploy_approval_wait_s','deploy_duration_s','lead_time_deployed_s'];
+  const csv=[h.join(',')].concat(rows.map(r=>[r.key,r.project,r.type,r.complexity,r.tier,r.credits,(r.credits*CFG.creditUsd).toFixed(4),r.outcome,r.prState||'',r.prNumber||'',r.files,r.lines,r.time,r.endTime||'',r.e2e_s??'',r.mergedAt||'',r.timeToMerge_s??'',r.leadTime_s??'',(r.deploy||{}).state||'',(r.deploy||{}).deployedAt||'',r.mergeToDeploy_s??'',(r.deploy||{}).approvalWait_s??'',(r.deploy||{}).deploy_s??'',r.leadTimeDeployed_s??''].join(','))).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='ai-pipeline-tickets.csv';a.click();
 };
 /* ===== Render ===== */

@@ -1,11 +1,24 @@
 name: Salesforce Deploy (real deploy on merge to main)
 
+# v7.2 (Oct 2026)
+# - The deploy step no longer ends with "|| true": a failed Salesforce deploy now fails the
+#   job (red X in GitHub Actions), so the pipeline's deploy tracker and anyone looking at
+#   Actions see the real result.
+# - The summary and the deploy-result artifact are still written when the deploy fails
+#   (if: always()), with a one-line status, component errors and Apex test failures.
+# - concurrency: deploys to the org run one at a time, in merge order (never cancelled).
+# - Still gated: the job waits for approval in environment salesforce-deploy-gate.
+
 on:
   push:
     branches: [main]
     paths:
       - 'force-app/**'
   workflow_dispatch: {}
+
+concurrency:
+  group: salesforce-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -28,18 +41,43 @@ jobs:
       - name: Real deploy with local tests
         id: deploy
         run: |
-          sf project deploy start --test-level RunLocalTests --target-org target-org --json > deploy-result.json || true
+          set +e
+          sf project deploy start --test-level RunLocalTests --target-org target-org --json > deploy-result.json
+          code=$?
+          set -e
           cat deploy-result.json
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -ne 0 ]; then
+            echo "::error title=Salesforce deploy failed::sf project deploy start exited $code - see the job summary and the deploy-result artifact"
+          fi
+          exit $code
 
       - name: Write step summary
+        if: always()
         run: |
-          echo "## Salesforce Deploy Result" >> $GITHUB_STEP_SUMMARY
-          echo '```json' >> $GITHUB_STEP_SUMMARY
-          cat deploy-result.json >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Salesforce Deploy Result"
+            if [ -s deploy-result.json ]; then
+              jq -r '"**Status:** \(.result.status // .name // "unknown")  |  **Deploy id:** \(.result.id // "n/a")  |  **Components:** \(.result.numberComponentsDeployed // 0)/\(.result.numberComponentsTotal // 0)  |  **Tests:** \(.result.numberTestsCompleted // 0) passed, \(.result.numberTestErrors // 0) failed"' deploy-result.json || true
+              echo ""
+              jq -r '[.result.details.componentFailures] | flatten | map(select(. != null)) | .[] | "- Component error: \(.fullName // "?") - \(.problem // "")"' deploy-result.json 2>/dev/null || true
+              jq -r '[.result.details.runTestResult.failures] | flatten | map(select(. != null)) | .[] | "- Test failure: \(.name // "?").\(.methodName // "?") - \(.message // "")"' deploy-result.json 2>/dev/null || true
+              echo ""
+              echo '<details><summary>Full JSON</summary>'
+              echo ""
+              echo '```json'
+              cat deploy-result.json
+              echo '```'
+              echo '</details>'
+            else
+              echo "No deploy result was produced (the job stopped before the deploy step)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload deploy result artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: deploy-result
           path: deploy-result.json
+          if-no-files-found: ignore
