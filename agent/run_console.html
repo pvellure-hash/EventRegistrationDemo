@@ -248,6 +248,8 @@ function phase(j){
   if(w){return w.idx===10?'Waiting for merge':w.idx===11?'Waiting for deploy approval':w.idx===3?'Waiting on another PR':'Waiting'}
   const r=[...st.values()].find(s=>s.status==='running');return r?'Running: '+r.label:'Working'}
 const jstat=j=>j.status==='attention'?'attention':j.status;
+const isIdle=j=>j.kind==='poll'&&j.status==='ok'&&(S.status==='stopped'||!!replay);   /* the watching job, after the watcher has stopped */
+const jicon=j=>(j.kind==='poll'&&j.status==='ok')?(isIdle(j)?'skipped':'running'):jstat(j);
 function pickAuto(){const t=tickets();const a=t.find(j=>j.status==='attention');if(a)return a.id;const r=t.find(j=>j.status==='running');if(r)return r.id;if(t.length)return t[0].id;
   if(jobs.has('poll')&&jobs.get('poll').status!=='pending'&&jobs.has('startup')&&jobs.get('startup').status==='ok')return 'poll';
   const u=[...jobs.values()].filter(j=>j.kind==='util').sort((a,b)=>b.order-a.order)[0];if(u&&!jobs.has('startup'))return u.id;
@@ -294,7 +296,7 @@ function renderBanners(){
   $('#banners').innerHTML=h}
 function renderSide(){
   const T=tickets(),W=['startup','poll'].filter(id=>jobs.has(id)).map(id=>jobs.get(id)),U=[...jobs.values()].filter(j=>j.kind==='util').sort((a,b)=>b.order-a.order);
-  const item=j=>`<button class="ji ${sel===j.id?'sel':''} ${j.status==='attention'?'att':''} ${j.status==='failed'?'bad':''}" data-job="${esc(j.id)}">${ico(jstat(j)==='ok'&&j.kind==='poll'?'running':jstat(j))}<div class="tx"><b>${esc(j.title)}</b><small>${esc(j.summary||'')}</small><small class="ph">${esc(phase(j))}</small></div><span class="du num" data-live data-s="${j.start||''}" data-e="${j.end||''}"></span></button>`;
+  const item=j=>`<button class="ji ${sel===j.id?'sel':''} ${j.status==='attention'?'att':''} ${j.status==='failed'?'bad':''}" data-job="${esc(j.id)}">${ico(jicon(j))}<div class="tx"><b>${esc(j.title)}</b><small>${esc(j.summary||'')}</small><small class="ph">${esc(phase(j))}</small></div><span class="du num" data-live data-s="${j.start||''}" data-e="${j.end||''}"></span></button>`;
   let h='';
   if(W.length)h+=`<div class="card grp"><div class="gh">Watcher</div>${W.map(item).join('')}</div>`;
   if(T.length)h+=`<div class="card grp"><div class="gh"><span>Tickets</span>${autoSel?'':'<button id="bFollow">Follow live</button>'}</div>${T.map(item).join('')}</div>`;
@@ -323,8 +325,8 @@ function renderDetail(){
   if(!head){box.innerHTML=`<div class="card" data-head="${esc(j.id)}"><div id="hd"></div><div class="tb" id="tbar"><input type="search" id="q" placeholder="Search the logs…" aria-label="Search the logs" value="${esc(filter)}"><button class="btn sm" id="bExp">Expand all</button><button class="btn sm" id="bCol">Collapse all</button><label class="tg"><input type="checkbox" id="tFollow" ${ui('follow',true)?'checked':''}> Follow output</label><label class="tg"><input type="checkbox" id="tTime" ${ui('time',true)?'checked':''}> Timestamps</label><span class="spacer"></span><button class="btn sm" id="bCopy">Copy log</button><a class="btn sm" href="/api/transcript?t=${encodeURIComponent(TOKEN)}" download>Download transcript</a></div></div><div class="card steps" id="stepsBox"></div>`;head=box.firstChild}
   const hd=$('#hd');
   const alerts=j.alert&&j.alert.length?`<div class="alertbox"><b>Pipeline alert</b>${j.alert.map(esc).join('<br>')}</div>`:'';
-  const pillCls={ok:'p-ok',running:'p-run',attention:'p-wait',waiting:'p-wait',failed:'p-bad',pending:'p-mute'}[j.status]||'p-mute';
-  hd.innerHTML=`<div class="jh"><div class="jt">${ico(jstat(j)==='ok'&&j.kind==='poll'?'running':jstat(j))}<div style="flex:1"><h2>${esc(j.title)}</h2>${j.summary?`<div class="sm2">${esc(j.summary)}</div>`:''}</div><span class="pill ${pillCls}">${esc(phase(j))}</span></div>${metaHtml(j)}${j.note&&j.kind==='ticket'&&j.note.startsWith('Stopped')?`<div class="alertbox"><b>${esc(j.note)}</b></div>`:''}${alerts}${j.kind==='ticket'?stripHtml(st):''}</div>`;
+  const pillCls=isIdle(j)?'p-mute':({ok:'p-ok',running:'p-run',attention:'p-wait',waiting:'p-wait',failed:'p-bad',pending:'p-mute'}[j.status]||'p-mute');
+  hd.innerHTML=`<div class="jh"><div class="jt">${ico(jicon(j))}<div style="flex:1"><h2>${esc(isIdle(j)&&!replay?'Watcher stopped':j.title)}</h2>${j.summary?`<div class="sm2">${esc(j.summary)}</div>`:''}</div><span class="pill ${pillCls}">${esc(phase(j))}</span></div>${metaHtml(j)}${j.note&&j.kind==='ticket'&&j.note.startsWith('Stopped')?`<div class="alertbox"><b>${esc(j.note)}</b></div>`:''}${alerts}${j.kind==='ticket'?stripHtml(st):''}</div>`;
   const sb=$('#stepsBox');const want=[...st.values()].filter(s=>j.kind!=='poll'||true).sort((a,b)=>a.idx-b.idx);
   if(sb.dataset.job!==j.id){sb.innerHTML='';sb.dataset.job=j.id}
   want.forEach(s=>{let el=sb.querySelector(`[data-idx="${s.idx}"]`);const key=j.id+'|'+s.idx;

@@ -461,7 +461,7 @@ try{
     var d=S.daemon,c=document.getElementById('svcChip'),t=document.getElementById('svcT');if(!d||!c)return;
     var bg=d.mode==='background';c.className='chip '+(bg?'ok':'att');t.textContent=bg?'Background service':'Running in this terminal';
     c.title=bg?'The watcher keeps running when you close this window. PID '+d.pid:'Closing the terminal stops the watcher.';
-    var g=document.getElementById('gosub');if(g&&bg&&!SV.gone)g.innerHTML+='<br><b>You can close this window.</b> The watcher keeps running in the background.';
+    var g=document.getElementById('gosub');if(g&&bg&&!SV.gone&&S.status!=='stopped')g.innerHTML+='<br><b>You can close this window.</b> The watcher keeps running in the background.';
     var b=document.getElementById('bStart');if(b&&S.orphan)b.disabled=true;
     renderPop();
   }
