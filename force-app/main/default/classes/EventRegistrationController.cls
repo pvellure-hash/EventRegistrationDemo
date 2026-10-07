@@ -96,7 +96,7 @@ public with sharing class EventRegistrationController {
 
     private static void validateRegistrationDetails(List<String> errors,
                                                     Integer numberOfGuests, Date eventDate) {
-        if (numberOfGuests == null || numberOfGuests < MIN_GUESTS || numberOfGuests > MAX_GUESTS) {
+        if (numberOfGuests == null || numberOfGuests < MIN_GUESTS || numberOfGuests > MAX_GUESTS+1) {
             errors.add('Number of guests must be between ' + MIN_GUESTS + ' and ' + MAX_GUESTS + '.');
         }
 
