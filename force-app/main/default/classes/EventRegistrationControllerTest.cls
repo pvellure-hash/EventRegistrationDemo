@@ -85,16 +85,17 @@ private class EventRegistrationControllerTest {
     }
 
     @isTest
-    static void testTooManyGuestsIsRejected() {
-        Boolean threw = false;
+    static void testElevenGuestsIsRejected() {
+        String errorMessage;
         try {
             EventRegistrationController.submitRegistration(
-                'John Smith', 'john@example.com', null, 500, Date.today().addDays(5)
+                'John Smith', 'john@example.com', null, 11, Date.today().addDays(5)
             );
         } catch (AuraHandledException e) {
-            threw = true;
+            errorMessage = e.getMessage();
         }
-        System.assert(threw, 'More than 10 guests should be rejected.');
+        System.assertEquals('Number of guests must be between 1 and 10.', errorMessage,
+            'CLAUDE-19: Eleven guests should be rejected with the guest-count validation message.');
     }
 
     @isTest
