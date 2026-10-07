@@ -5,6 +5,24 @@ import EventRegistrationForm from 'c/eventRegistrationForm';
 
 const getRecentRegistrationsAdapter = registerApexTestWireAdapter(getRecentRegistrations);
 
+it('shows the confirmation number and attendee name in their respective columns', async () => {
+    const element = createElement('c-event-registration-form', { is: EventRegistrationForm });
+    document.body.appendChild(element);
+    getRecentRegistrationsAdapter.emit([{
+        Id: 'registration-test-id',
+        Name: 'REG-000001',
+        Attendee_Name__c: 'Attendee Tester',
+        Number_of_Guests__c: 2,
+        Event_Date__c: '2027-01-15',
+        Status__c: 'Pending',
+    }]);
+    await Promise.resolve();
+
+    const cells = element.shadowRoot.querySelectorAll('tbody tr td');
+    expect(cells[0].textContent).toBe('REG-000001');
+    expect(cells[1].textContent).toBe('Attendee Tester');
+});
+
 it('prefills editable details and keeps attendee name and email read-only', async () => {
     const element = createElement('c-event-registration-form', { is: EventRegistrationForm });
     document.body.appendChild(element);
