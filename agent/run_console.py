@@ -101,7 +101,12 @@ def load_env(path):
             line = raw.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+                v = v.strip()
+                if v[:1] in ("'", '"') and v.count(v[0]) >= 2:      # quoted value: keep what is inside the quotes
+                    v = v[1:v.index(v[0], 1)]
+                else:                                                  # unquoted: drop a trailing " # comment"
+                    v = re.split(r"\s+#", v, maxsplit=1)[0].strip()
+                os.environ.setdefault(k.strip(), v)
     except OSError:
         pass
 
