@@ -56,7 +56,7 @@ private class EventRegistrationControllerTest {
             errorMessage = e.getMessage();
         }
         System.assertEquals('Number of guests must be between 1 and 10.', errorMessage,
-            'CLAUDE-16: Zero guests should be rejected with the guest-count validation message.');
+            'CLAUDE-20: Zero guests should be rejected with the guest-count validation message.');
     }
 
     @isTest
@@ -81,7 +81,7 @@ private class EventRegistrationControllerTest {
         );
         Test.stopTest();
 
-        System.assertNotEquals(null, newId, 'CLAUDE-16: Exactly 1 guest (the minimum boundary) should be accepted.');
+        System.assertNotEquals(null, newId, 'CLAUDE-20: Exactly 1 guest (the minimum boundary) should be accepted.');
     }
 
     @isTest
@@ -95,7 +95,7 @@ private class EventRegistrationControllerTest {
             errorMessage = e.getMessage();
         }
         System.assertEquals('Number of guests must be between 1 and 10.', errorMessage,
-            'CLAUDE-19: Eleven guests should be rejected with the guest-count validation message.');
+            'CLAUDE-20: Eleven guests should be rejected with the guest-count validation message.');
     }
 
     @isTest
@@ -105,7 +105,7 @@ private class EventRegistrationControllerTest {
             'Boundary Tester', 'boundary@example.com', null, 10, Date.today().addDays(5)
         );
         Test.stopTest();
-        System.assertNotEquals(null, newId, 'Exactly 10 guests (the max boundary) should be accepted.');
+        System.assertNotEquals(null, newId, 'CLAUDE-20: Exactly 10 guests (the max boundary) should be accepted.');
     }
 
     @isTest
