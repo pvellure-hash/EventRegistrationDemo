@@ -133,9 +133,22 @@ def find_test_classes(files):
     return sorted(tests)
 
 
+APEX_PATHS = (CLASSES_DIR, "force-app/main/default/triggers/")
+
+
+def apex_changed(files):
+    """True when the change touches Apex (classes or triggers). A page-only fix (LWC/Aura) changes none."""
+    return any(f.startswith(APEX_PATHS) for f in files)
+
+
 def run_apex_tests(key, files):
     if not RUN_APEX_TESTS:
         warn("Apex tests in org", "skipped (AGENT_RUN_APEX_TESTS=false)")
+        return
+    # v10: a page-only fix (LWC/Aura) changes no Apex, so there is no test class to find. That is not a failure.
+    # Every Apex test still runs in the Salesforce Validate PR check (RunLocalTests) and again at the deploy.
+    if not apex_changed(files):
+        warn("Apex tests in org", "skipped: no Apex changed (page-only fix); all Apex tests run in the Salesforce Validate PR check and at the deploy")
         return
     if not SF_TARGET_ORG:
         check("Apex tests in org", False, "SF_TARGET_ORG missing in .env")
