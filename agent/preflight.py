@@ -45,6 +45,18 @@ try:
 except ImportError:
     pass  # python-dotenv not installed; fall back to whatever is already in the environment
 
+# v12: tokens come from the secret store (Windows Credential Manager or a cloud vault), not .env.
+_SECRET_ERROR = None
+try:
+    import secret_store
+except ImportError:
+    secret_store = None
+if secret_store is not None:
+    try:
+        secret_store.inject()
+    except secret_store.SecretStoreError as _e:
+        _SECRET_ERROR = str(_e)
+
 BASE_BRANCH = os.getenv("GITHUB_BASE_BRANCH", "main").strip()
 
 
@@ -232,12 +244,37 @@ def check_salesforce():
 
 
 # ---------------------------------------------------------------- Runner
+# Group E (v12): secrets. Kept next to run_all so the runner below stays unchanged.
+def check_secrets():
+    """The tokens must live in the secret store, and .env must hold none."""
+    if secret_store is None:
+        return [("E1 secret store available", False, "secret_store.py is missing from the agent folder")]
+    if _SECRET_ERROR:
+        return [("E1 secret store available", False, _SECRET_ERROR)]
+    try:
+        st = secret_store.store()
+        missing = [n for n in secret_store.secret_names() if not st.get(n)]
+        label = " + ".join(b.label for b in st.backends)
+    except secret_store.SecretStoreError as e:
+        return [("E1 secret store available", False, str(e))]
+    from pathlib import Path
+    left = secret_store.secrets_in_env_file(Path(os.path.join(REPO_ROOT, ".env")))
+    return [
+        ("E1 tokens present in the secret store", not missing,
+         "all present in " + label if not missing else
+         "missing: %s - run: python secret_store.py migrate --yes (or: python secret_store.py set NAME)" % ", ".join(missing)),
+        ("E2 .env holds no secret values", not left,
+         "clean" if not left else "still in .env: %s - run: python secret_store.py migrate --yes" % ", ".join(left)),
+    ]
+
+
 def run_all(verbose=True):
     groups = [
         ("Repository state (incl. sync to latest origin/%s)" % BASE_BRANCH, check_git_state),
         ("Copilot CLI", check_copilot_cli),
         ("Credentials and config", check_credentials),
         ("Salesforce", check_salesforce),
+        ("Secrets (v12)", check_secrets),
     ]
     all_results, all_passed = [], True
     if verbose:

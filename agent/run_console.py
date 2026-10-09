@@ -44,6 +44,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+import secret_store      # v12: tokens come from the secret store, not .env
+import console_auth      # v12: sign-in, roles and audit
 
 DEFAULT_PORT = 8765
 ALLOWED_UTILS = {"preflight": ("preflight.py", "Pre-flight check"),
@@ -687,6 +689,7 @@ class Hub:
                                 stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kw)
 
     def start_watcher(self):
+        self._refresh_secrets()
         with self.lock:
             if self.proc is not None:
                 raise RuntimeError("The watcher is already running.")
@@ -709,6 +712,14 @@ class Hub:
         self.emit(self.parser.begin(t0) + self.parser.raw_line("startup", 1, "$ python watch_queue.py", t0, "cmd"))
         self._push_state()
         threading.Thread(target=self._reader, args=(popen, "watcher"), daemon=True).start()
+
+    def _refresh_secrets(self):
+        """v12: re-read the tokens from the secret store so a rotated token is used from the next watcher start."""
+        try:
+            secret_store.refresh_environment()
+        except secret_store.SecretStoreError as e:
+            raise RuntimeError(f"Secrets could not be read: {e}")
+        self.secrets = secret_values()
 
     def stop(self):
         with self.lock:
@@ -981,11 +992,18 @@ class Handler(BaseHTTPRequestHandler):
             if origin and origin not in {f"http://{h}" for h in self.server.allowed_hosts}:
                 self._send(403, {"error": "Origin not allowed"})
                 return False
+        auth = getattr(self.server, "auth", None)        # v12: sign-in and roles
+        if auth is not None and auth.handle(self):         # /auth/* pages and calls are served here
+            return False
         if need_token:
             q = parse_qs(urlparse(self.path).query)
             tok = self.headers.get("X-Console-Token") or (q.get("t") or [""])[0]
             if not secrets.compare_digest(tok.encode(), self.hub.token.encode()):
                 self._send(401, {"error": "Missing or wrong token. Open the address printed by run_console.py."})
+                return False
+        if auth is not None:
+            self.user = auth.require(self)                 # 302/401/403 are sent by require()
+            if self.user is None:
                 return False
         return True
 
@@ -996,7 +1014,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path in ("/", "/index.html"):
                 if not self._guard(need_token=False):
                     return
-                html = (self.hub.agent_dir / "run_console.html").read_bytes()
+                html = console_auth.inject_ui((self.hub.agent_dir / "run_console.html").read_bytes())
                 return self._send(200, html, "text/html; charset=utf-8", {"Content-Security-Policy":
                                   "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'self'"})
             if not self._guard():
@@ -1040,7 +1058,10 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/stop":
                 self.hub.stop()
             elif u.path == "/api/answer":
+                key = (self.hub.prompt or {}).get("key")
                 self.hub.answer(body.get("answer", "n"))
+                console_auth.record(self, "review_decision", ticket=key,
+                                    decision="approved" if str(body.get("answer", "n")).lower().startswith("y") else "rejected")
             elif u.path == "/api/util":
                 self.hub.run_util(body.get("name", ""))
             else:
@@ -1103,7 +1124,12 @@ def main():
     if not (agent_dir / "run_console.html").exists():
         raise SystemExit("run_console.html must be in the same folder as run_console.py.")
     load_env(agent_dir.parent / ".env")
+    try:
+        console_auth.startup_check(agent_dir)           # v12: secrets readable and sign-in configured
+    except RuntimeError as e:
+        raise SystemExit(f"Cannot start the console: {e}")
     srv, hub = make_server(agent_dir, a.port)
+    srv.auth = console_auth.install(hub, srv.server_address[1])
     port = srv.server_address[1]
     url = f"http://127.0.0.1:{port}/#t={hub.token}"
     print("=" * 60)

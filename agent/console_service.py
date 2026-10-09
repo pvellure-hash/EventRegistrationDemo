@@ -59,6 +59,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import run_console as rc  # noqa: E402
+import console_auth  # noqa: E402
 
 DETACHED_PROCESS, NEW_PROCESS_GROUP, BREAKAWAY, NO_WINDOW = 0x00000008, 0x00000200, 0x01000000, 0x08000000
 DEFAULT_SETTINGS = {"notify": True, "autoStartWatcher": False}
@@ -511,7 +512,7 @@ class ServiceHandler(rc.Handler):
             if not f.exists():
                 return self._send(404, {"error": "run_console.html must be in the same folder as console_service.py."})
             html = f.read_text(encoding="utf-8")
-            inject = f"<style>{SERVICE_CSS}</style><script>{SERVICE_JS}</script>"
+            inject = f"<style>{SERVICE_CSS}</style><script>{SERVICE_JS}</script>" + console_auth.ui_snippet()
             i = html.lower().rfind("</body>")
             html = html[:i] + inject + html[i:] if i >= 0 else html + inject
             return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8",
@@ -630,7 +631,7 @@ def call(info, path, method="GET", body=None, timeout=4):
     c = http.client.HTTPConnection("127.0.0.1", info["port"], timeout=timeout)
     try:
         c.request(method, path, body=json.dumps(body) if body is not None else None,
-                  headers={"Host": f"127.0.0.1:{info['port']}", "X-Console-Token": info["token"], "Content-Type": "application/json"})
+                  headers={"Host": f"127.0.0.1:{info['port']}", "X-Console-Token": info["token"], "X-Console-Control": info.get("control", ""), "Content-Type": "application/json"})
         r = c.getresponse()
         data = r.read()
         try:
@@ -690,6 +691,7 @@ def ensure_daemon(agent_dir, port=None, wait=25):
                 raise RuntimeError(f"The background service (PID {info['pid']}) is running but not answering. "
                                    f"Run: python console_service.py --quit   (or end PID {info['pid']} in Task Manager).")
         return info, False
+    console_auth.startup_check(agent_dir)   # v12: refuse to start a service that cannot read its secrets or sign anyone in
     spawn_daemon(agent_dir, port)
     deadline = time.time() + wait
     while time.time() < deadline:
@@ -743,9 +745,15 @@ def run_service(agent_dir, port, detached):
             sys.stdout = sys.stderr = open(log, "a", encoding="utf-8", buffering=1)
             print(f"--- service starting {time.strftime('%Y-%m-%d %H:%M:%S')} pid {os.getpid()}")
         rc.load_env(agent_dir.parent / ".env")
+        try:
+            console_auth.startup_check(agent_dir)           # v12
+        except RuntimeError as e:
+            print(f"service cannot start: {e}")
+            return 1
         token = rc.secrets.token_urlsafe(16)
         srv, hub = make_server(agent_dir, port, token, background=detached)
-        info = {"pid": os.getpid(), "port": srv.server_address[1], "token": token, "started": rc.now_ms(), "agent_dir": str(agent_dir), "mode": "background" if detached else "foreground"}
+        srv.auth = console_auth.install(hub, srv.server_address[1])
+        info = {"pid": os.getpid(), "port": srv.server_address[1], "token": token, "control": srv.auth.control_token, "started": rc.now_ms(), "agent_dir": str(agent_dir), "mode": "background" if detached else "foreground"}
         hub.window_url = window_url(info)
         info_path(agent_dir).write_text(json.dumps(info), encoding="utf-8")
     finally:
