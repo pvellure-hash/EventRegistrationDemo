@@ -106,6 +106,9 @@ private class EventRegistrationControllerTest {
         );
         Test.stopTest();
         System.assertNotEquals(null, newId, 'CLAUDE-20: Exactly 10 guests (the max boundary) should be accepted.');
+        Event_Registration__c registration = [SELECT Number_of_Guests__c FROM Event_Registration__c WHERE Id = :newId];
+        System.assertEquals(10, registration.Number_of_Guests__c,
+            'CLAUDE-22: Exactly 10 guests should be saved as the maximum allowed count.');
     }
 
     @isTest
