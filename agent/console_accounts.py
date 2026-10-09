@@ -1,11 +1,11 @@
-"""console_accounts.py - user accounts, allowed email domains, email verification and manager approval (v14).
+"""console_accounts.py - user accounts, allowed email domains, email verification and approval (v15).
 
 Requesting access, step by step:
 
     1. details   name, work email, username, password       email domain must be on the allowed list
     2. verify    a 6-digit code is e-mailed; it expires after CONSOLE_VERIFY_CODE_MINUTES (15)
-    3. pending   only a verified request reaches the managers
-    4. decision  a manager approves (and picks a role) or rejects
+    3. pending   only a verified request reaches the project administrators
+    4. decision  a project administrator approves (and picks a role) or rejects
     5. active    the person can sign in, while their email domain stays on the allowed list
 
 Rules built in
@@ -16,17 +16,18 @@ Rules built in
   * verification codes are random, stored only as a salted hash, single use, 5 wrong tries end the request,
     a resend is allowed after 60 seconds (3 at most) and replaces the previous code
   * allowed domains: exact match ("deloitte.ca"), or "*.gov.bc.ca" for every sub-domain of gov.bc.ca;
-    an empty list means nobody can request access and only managers can sign in
+    an empty list means nobody can request access and only administrators can sign in
   * sign-in checks the password first, then the status and domain, so nobody learns that an account exists without
     knowing its password; the unknown-user path costs the same time as a real one
   * lock-out after CONSOLE_LOCKOUT_ATTEMPTS (5) wrong passwords for CONSOLE_LOCKOUT_MINUTES (15)
-  * one account per email address; a manager can never approve their own request; the last manager cannot be removed
+  * one account per email address; an administrator can never approve their own request; the last administrator
+    cannot be removed
   * files are written atomically and re-read when they change, so a disabled user or a removed domain loses access
     on their next request
 
 Files (in CONSOLE_DATA_DIR, default %USERPROFILE%\\.ai-delivery; keep them out of git):
   accounts.json   accounts (password hashes, roles, status)
-  domains.json    the allowed email domains
+  domains.json    the allowed email domains (standalone mode; in platform mode they come from signed grants)
 """
 from __future__ import annotations
 
@@ -110,15 +111,56 @@ def _public(rec: dict) -> dict:
     return {k: v for k, v in rec.items() if k != "pw"}
 
 
+REPLACE_TRIES = 8
+REPLACE_SLEEP = time.sleep                  # tests swap this so they do not really wait
+
+
+def replace_file(src, dst, tries: int | None = None):
+    """os.replace that rides out the short lock Windows puts on a file while a virus scanner, the search indexer or
+    another reader has it open (WinError 5 or 32). Waits 0.02 s, 0.04 s, 0.08 s ... (about 2.5 s in all), then gives
+    up and raises the original error, so a real permission problem still shows. Other errors are never retried."""
+    tries = tries or REPLACE_TRIES
+    for n in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if n == tries - 1:
+                raise
+            REPLACE_SLEEP(0.02 * (2 ** n))
+
+
+def read_text(path, encoding="utf-8-sig", tries: int | None = None) -> str:
+    """Path.read_text that rides out the same short Windows lock while another process is replacing the file.
+    FileNotFoundError is raised at once (a missing file is normal and callers handle it)."""
+    tries = tries or REPLACE_TRIES
+    for n in range(tries):
+        try:
+            return Path(path).read_text(encoding=encoding)
+        except PermissionError:
+            if n == tries - 1:
+                raise
+            REPLACE_SLEEP(0.02 * (2 ** n))
+
+
 def _atomic_write(path: Path, data: dict):
+    """Write JSON next to the target, then swap it in. The temporary name is unique per write, so two writers can
+    never collide, and it is removed if anything fails, so a failed write leaves the old file and no litter."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(3)}.tmp")
     try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        replace_file(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _stamp(path: Path):
@@ -145,7 +187,7 @@ def normalise_domain(value: str) -> str:
 
 
 class DomainPolicy:
-    """domains.json: {"domains": ["deloitte.ca", "*.gov.bc.ca"]}. Re-read when it changes.
+    """domains.json: {"domains": ["deloitte.ca", "*.gov.bc.ca"]}. Re-read when it changes. Used in standalone mode.
     A missing file means an empty list. An unreadable file allows nobody (fail closed) and is never overwritten."""
 
     def __init__(self, path):
@@ -164,7 +206,7 @@ class DomainPolicy:
         if st == self._stamp:
             return
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8-sig")).get("domains") or []
+            raw = json.loads(read_text(self.path)).get("domains") or []
             out = []
             for d in raw:
                 try:
@@ -191,6 +233,9 @@ class DomainPolicy:
     def allows(self, email: str) -> bool:
         return any(domain_matches(entry, email) for entry in self.list())
 
+    def rows(self, count_users) -> list[dict]:
+        return [{"domain": d, "active_users": count_users(d), "state": "allowed"} for d in self.list()]
+
     def add(self, value: str) -> str:
         d = normalise_domain(value)
         with self.lock:
@@ -215,6 +260,9 @@ class DomainPolicy:
             _atomic_write(self.path, {"domains": self._domains})
             self._stamp = _stamp(self.path)
             return True
+
+    def restore(self, value: str) -> bool:
+        raise AccountError("not_supported", "Domains are managed directly in standalone mode; use add.")
 
 
 # --------------------------------------------------------------------------- the account store
@@ -241,7 +289,7 @@ class AccountStore:
         if m == self._mtime:
             return
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
+            data = json.loads(read_text(self.path))
             self._users = {str(k).lower(): v for k, v in (data.get("users") or {}).items() if isinstance(v, dict)}
             self._mtime, self._error = m, None
         except (ValueError, AttributeError) as exc:
@@ -278,7 +326,7 @@ class AccountStore:
         return [r for r in self.list_users() if r["status"] == "active" and r.get("admin")]
 
     def count_active_in_domain(self, entry: str) -> int:
-        """Active non-manager accounts whose email matches this allowed-domain entry."""
+        """Active non-administrator accounts whose email matches this allowed-domain entry."""
         return sum(1 for r in self.list_users()
                    if r["status"] == "active" and not r.get("admin") and domain_matches(entry, r.get("email", "")))
 
@@ -395,14 +443,15 @@ class AccountStore:
                 new["admin"] = bool(admin)
             others = [r for k, r in self._users.items() if k != key and r["status"] == "active" and r.get("admin")]
             if not others and not (new["status"] == "active" and new.get("admin")):
-                raise AccountError("last_admin", "At least one active manager must remain.")
+                raise AccountError("last_admin", "At least one active project administrator must remain.")
             rec.update(new)
             rec.update(changed_by=by, changed_at=self.clock())
             self._save()
             return _public(rec)
 
-    # ---- command-line helpers (local, trusted)
+    # ---- project administrators
     def bootstrap_admin(self, username, name, email, password) -> dict:
+        """Standalone mode only (the console refuses this when a platform key is configured)."""
         username, email = (username or "").strip(), (email or "").strip()
         if not USERNAME.match(username):
             raise AccountError("bad_username", "Username: 3-32 letters, digits, dot, dash or underscore.")
@@ -411,20 +460,28 @@ class AccountStore:
         problem = password_problem(password or "", username, email, self.min_len)
         if problem:
             raise AccountError("weak_password", problem)
-        pw = hash_password(password)
+        return self.create_admin_with_hash(username, name, email, hash_password(password), source="bootstrap")
+
+    def create_admin_with_hash(self, username, name, email, pw_hash, source="invitation") -> dict:
+        """Create an active project administrator whose password was already hashed (the invitation flow)."""
+        username, email = (username or "").strip(), (email or "").strip()
+        if not USERNAME.match(username):
+            raise AccountError("bad_username", "Username: 3-32 letters, digits, dot, dash or underscore.")
+        if not EMAIL.match(email):
+            raise AccountError("bad_email", "Enter a valid email address.")
         with self.lock:
             self._load()
             if username.lower() in self._users:
-                raise AccountError("username_taken", "That user already exists. Use reset-password, or make-manager.")
+                raise AccountError("username_taken", "That user already exists. Use reset-password, or make-admin.")
             rec = {"username": username, "name": " ".join((name or username).split()), "email": email, "role": "approver",
-                   "admin": True, "status": "active", "pw": pw, "requested": self.clock(), "reason": "bootstrap",
-                   "decided_by": "cli", "decided_at": self.clock()}
+                   "admin": True, "status": "active", "pw": pw_hash, "requested": self.clock(), "reason": source,
+                   "decided_by": source, "decided_at": self.clock()}
             self._users[username.lower()] = rec
             self._save()
             return _public(rec)
 
-    def make_manager(self, username: str) -> dict:
-        """CLI only: turn an existing account into an active manager with the approver role."""
+    def make_admin(self, username: str) -> dict:
+        """CLI only: turn an existing account into an active project administrator with the approver role."""
         key = (username or "").strip().lower()
         with self.lock:
             self._load()
@@ -434,6 +491,8 @@ class AccountStore:
             rec.update(status="active", admin=True, role="approver", changed_by="cli", changed_at=self.clock())
             self._save()
             return _public(rec)
+
+    make_manager = make_admin                  # the old name still works
 
     def set_password(self, username: str, password: str):
         key = (username or "").strip().lower()
@@ -561,10 +620,11 @@ def _secret_from_store(name: str):
 
 
 class Notifier:
-    """E-mail: verification codes, new requests (to managers) and decisions (to the requester).
-    Off unless CONSOLE_SMTP_HOST and CONSOLE_SMTP_FROM are set. Manager recipients: CONSOLE_MANAGER_EMAILS, else
-    every active manager. The SMTP password comes from the secret store (SMTP_PASSWORD; add it to SECRETS_EXTRA).
-    TLS is always used. Notices never block a request; a verification code that cannot be sent is reported."""
+    """E-mail: verification codes, new requests (to project administrators) and decisions (to the requester).
+    Off unless CONSOLE_SMTP_HOST and CONSOLE_SMTP_FROM are set. Recipients for new requests: CONSOLE_MANAGER_EMAILS,
+    else every active administrator. The SMTP password comes from the secret store (SMTP_PASSWORD; add it to
+    SECRETS_EXTRA). TLS is always used. Notices never block a request; a verification code that cannot be sent is
+    reported."""
 
     def __init__(self, store, env=None, sender=None, on_result=None, secret=None, threaded=True):
         e = os.environ if env is None else env
@@ -597,6 +657,14 @@ class Notifier:
         m.set_content(body)
         return m
 
+    def send_plain(self, to: str, subject: str, body: str):
+        """Synchronous. Raises if e-mail is off or the send fails. Used for platform invitations."""
+        if not self.enabled:
+            raise RuntimeError("e-mail is not configured")
+        if not EMAIL.match(to or ""):
+            raise RuntimeError("not a valid address")
+        self._sender(self._build([to], subject, body))
+
     def send_code(self, email: str, name: str, code: str, minutes: int):
         """Synchronous, so the person is told at once if the code could not be sent. Raises on failure."""
         if not self.enabled:
@@ -614,7 +682,7 @@ class Notifier:
         body = (f"{_clean(rec['name'], 80)} ({_clean(rec['email'], 120)}) asked for access to the AI Delivery Console.\n"
                 f"Username: {_clean(rec['username'], 40)}\nReason: {_clean(rec.get('reason'), 500) or '(none given)'}\n"
                 f"The email address was verified with a code.\n{link}"
-                "Nothing happens until a manager approves the request.\n")
+                "Nothing happens until a project administrator approves the request.\n")
         return self._dispatch("request", self._build(to, f"Access request: {_clean(rec['name'], 60)}", body))
 
     def decided(self, rec: dict, decision: str, by: str) -> bool:
