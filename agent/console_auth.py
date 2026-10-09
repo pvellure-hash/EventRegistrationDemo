@@ -1,34 +1,45 @@
-"""console_auth.py - sign-in, roles, allowed domains, email verification, manager approval and audit (v14).
+"""console_auth.py - sign-in, roles, allowed domains, invitations, email verification, approval and audit (v15).
 
 Choose how people sign in with CONSOLE_AUTH_MODE in .env (there is no "off"):
 
   windows   The Windows Security window opens (PIN, fingerprint, face or password) and Windows checks it.
             For a laptop. Needs an access list entry for your Windows account.
   accounts  Username + password accounts. A person asks for access with a work email on an ALLOWED DOMAIN, proves
-            the address with an e-mailed code (15 minutes), and a MANAGER approves and picks a role.
+            the address with an e-mailed code (15 minutes), and a PROJECT ADMINISTRATOR approves and picks a role.
             For a shared or hosted console (Docker, a server).
   entra     Microsoft Entra ID sign-in (company SSO, MFA).
   local     No prompt: trusts the Windows account running the service. Single-user fallback.
+
+Two ways to run accounts mode
+  standalone  (default)  one team runs its own console: it adds its own email domains and creates its first
+                         administrator with `bootstrap-admin`.
+  platform    (CONSOLE_PLATFORM_PUBLIC_KEY set)  the console belongs to a project that the Deloitte platform team
+                         onboarded. The allowed email domains come ONLY from grants the platform team signed; a
+                         project administrator can pause or resume a domain but never add one. The first
+                         administrator is the person the platform team invited: they claim a single-use invitation
+                         at /auth/claim (invitation code + a code e-mailed to the invited address) and choose their
+                         own password. Nobody sets it for them.
 
 Roles (each includes the ones before it):
   viewer    see runs, logs, dashboard
   operator  + start/stop the watcher, pre-flight, rebuild dashboard, service settings
   approver  + approve / reject at the review gate
-Access management is a SEPARATE power ("manager", accounts mode): approving who may use the console and which
-email domains may ask does not by itself allow approving a code change. Managers can always sign in.
+A PROJECT ADMINISTRATOR (accounts mode) is a separate power: approving who may use the console and which allowed
+domains are paused does not by itself allow approving a code change. Administrators can always sign in.
 
 Enforced on every request, on the server (the page only mirrors it):
   * sessions: random 256-bit id in an HttpOnly, SameSite=Strict cookie; 30 min idle, 8 h maximum
-  * Approve / Reject and manager actions need a sign-in within the last CONSOLE_APPROVE_REAUTH_MIN (60) minutes
-  * accounts, access list and allowed domains are re-read on every request: disable someone or remove their domain
-    and access ends at once
+  * Approve / Reject and administrator actions need a sign-in within the last CONSOLE_APPROVE_REAUTH_MIN (60) minutes
+  * accounts, access list, allowed domains and grants are re-read on every request: disable someone, pause a domain
+    or revoke a grant and access ends at once
   * unknown routes are deny-by-default; every sign-in, denial, action and decision is audited by name
-    (logs\\run-console\\auth-audit.jsonl; passwords, codes, tokens and cookies are never logged)
+    (logs\\run-console\\auth-audit.jsonl; passwords, codes, invitation codes, tokens and cookies are never logged)
 
 Settings (.env, no comments after values):
   CONSOLE_AUTH_MODE=windows|accounts|entra|local
+  CONSOLE_PLATFORM_PUBLIC_KEY=<base64>             platform mode: the platform team's PUBLIC key (not a secret)
   CONSOLE_WINDOWS_VERIFY=auto|hello|password       windows mode (default auto: Hello first, then password window)
-  CONSOLE_DATA_DIR=<folder>                        accounts.json and domains.json (default %USERPROFILE%\\.ai-delivery)
+  CONSOLE_DATA_DIR=<folder>                        accounts, domains and grants (default %USERPROFILE%\\.ai-delivery)
   CONSOLE_ALLOW_REGISTRATION=true                  accounts mode: let people request access
   CONSOLE_VERIFY_CODE_MINUTES=15                   how long an emailed code is valid (5-60)
   CONSOLE_VERIFY_DELIVERY=email|log                log = write codes to logs\\run-console\\verification-codes.log
@@ -42,14 +53,16 @@ Settings (.env, no comments after values):
   CONSOLE_REQUIRE_MFA, CONSOLE_SESSION_IDLE_MIN, CONSOLE_SESSION_MAX_HOURS, CONSOLE_APPROVE_REAUTH_MIN
 
 Command line (run from agent\\):
+  python console_auth.py project                            this console's project, domains and invitation status
+  python console_auth.py grant apply FILE                   apply a grant file from the platform team (platform mode)
   python console_auth.py domains                            list allowed email domains
-  python console_auth.py domains add deloitte.ca            allow a domain   (*.gov.bc.ca = every sub-domain)
-  python console_auth.py domains remove gov.bc.ca           stop allowing a domain
+  python console_auth.py domains add deloitte.ca            standalone: allow a domain   (*.gov.bc.ca = all sub-domains)
+  python console_auth.py domains remove|restore gov.bc.ca   platform: pause or resume a domain; standalone: remove
   python console_auth.py windows-test [--method auto|hello|password]   try the Windows sign-in prompt
   python console_auth.py init [--upn you@company.com]       access list with you as approver (windows/local/entra)
   python console_auth.py add|remove|list ...                manage the access list
-  python console_auth.py bootstrap-admin --user pavan --email p@x.com  first manager for accounts mode
-  python console_auth.py make-manager --user pavan          turn an existing account into a manager
+  python console_auth.py bootstrap-admin --user pavan --email p@x.com  standalone only: first administrator
+  python console_auth.py make-admin --user pavan            turn an existing account into a project administrator
   python console_auth.py accounts | requests                list accounts / pending requests
   python console_auth.py approve --user u --role viewer     | reject --user u | disable --user u | enable --user u
   python console_auth.py reset-password --user u
@@ -70,6 +83,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 import console_accounts as accts
+import platform_trust as pt
 
 ROLES = ("viewer", "operator", "approver")
 RANK = {r: i for i, r in enumerate(ROLES)}
@@ -129,8 +143,10 @@ class AuthConfig:
         self.client_id = (e.get("ENTRA_CLIENT_ID") or e.get("AZURE_CLIENT_ID") or "").strip()
         self.access_file = default_access_file(e)
         d = data_dir(e)
+        self.data_dir = d
         self.accounts_file = d / "accounts.json"
         self.domains_file = d / "domains.json"
+        self.platform_key = (e.get("CONSOLE_PLATFORM_PUBLIC_KEY") or "").strip()
         self.windows_verify = (e.get("CONSOLE_WINDOWS_VERIFY") or "auto").strip().lower()
         self.allow_registration = _flag(e, "CONSOLE_ALLOW_REGISTRATION", "true")
         self.verify_minutes = _env_int(e, "CONSOLE_VERIFY_CODE_MINUTES", 15)
@@ -158,6 +174,12 @@ class AuthConfig:
             raise AuthConfigError("CONSOLE_VERIFY_CODE_MINUTES must be between 5 and 60")
         if self.verify_delivery not in ("email", "log"):
             raise AuthConfigError("CONSOLE_VERIFY_DELIVERY must be email or log")
+        if self.platform_key:
+            try:
+                pt.check_public_key(self.platform_key)
+            except pt.TrustError:
+                raise AuthConfigError("CONSOLE_PLATFORM_PUBLIC_KEY is not a valid public key. Copy it exactly from "
+                                      "the platform team (python platform_admin.py public-key).")
         if self.mode == "entra":
             if not GUID.match(self.tenant_id):
                 raise AuthConfigError("ENTRA_TENANT_ID must be your tenant's GUID "
@@ -193,7 +215,7 @@ class AccessList:
         if mtime == self._mtime:
             return
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
+            data = json.loads(accts.read_text(self.path))
             self._users = [u for u in data.get("users", []) if u.get("role") in RANK]
             self._mtime, self._error = mtime, None
         except (ValueError, AttributeError) as exc:
@@ -225,14 +247,21 @@ class AccessList:
 
 def _write_access(path: Path, users: list[dict]):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"users": users}, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(3)}.tmp")
+    try:
+        tmp.write_text(json.dumps({"users": users}, indent=2) + "\n", encoding="utf-8")
+        accts.replace_file(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _read_users(path: Path) -> list[dict]:
     try:
-        return list(json.loads(path.read_text(encoding="utf-8-sig")).get("users", []))
+        return list(json.loads(accts.read_text(path)).get("users", []))
     except (OSError, ValueError):
         return []
 
@@ -251,7 +280,7 @@ def msal_interactive(cfg: AuthConfig) -> dict:
 class AuthGate:
     def __init__(self, cfg: AuthConfig, audit_path, port="", signer=None, clock=time.time,
                  access: AccessList | None = None, console_token: str = "", accounts=None, verifier=None,
-                 notifier=None, domains=None, verifications=None):
+                 notifier=None, domains=None, verifications=None, trust=None):
         self.cfg = cfg
         self.access = access or AccessList(cfg.access_file)
         self.audit_path = Path(audit_path)
@@ -264,18 +293,28 @@ class AuthGate:
         self.sessions: dict[str, dict] = {}
         self.attempts: dict[str, dict] = {}
         self.lock = threading.Lock()
+        self.claim_lock = threading.Lock()
+        self._claim_fails: list[float] = []
         self.login_running = False
         self.accounts = accounts
         if cfg.mode == "accounts" and self.accounts is None:
             self.accounts = accts.AccountStore(cfg.accounts_file, clock=clock, min_len=cfg.min_password,
                                                max_fail=cfg.lock_attempts, lock_s=cfg.lock_s)
-        self.domains = domains or accts.DomainPolicy(cfg.domains_file)
+        self.trust = trust
+        if self.trust is None and cfg.mode == "accounts" and cfg.platform_key:
+            self.trust = pt.InstanceTrust(cfg.data_dir, cfg.platform_key, clock=clock)
+        self.domains = domains or (pt.PlatformDomains(self.trust, cfg.data_dir / "domain-pauses.json") if self.trust
+                                   else accts.DomainPolicy(cfg.domains_file))
         self.verifications = verifications or accts.VerificationStore(clock=clock, ttl_s=cfg.verify_minutes * 60)
         self.verifier = verifier
         if cfg.mode == "windows" and self.verifier is None:
             import windows_login
             self.verifier = windows_login.WindowsVerifier(cfg.windows_verify)
         self.notifier = notifier or accts.Notifier(self.accounts, cfg.env, on_result=self._mail_result)
+
+    @property
+    def domain_control(self) -> str:
+        return "platform" if self.trust else "local"
 
     # ---- audit
     def audit(self, event, **fields):
@@ -383,11 +422,11 @@ class AuthGate:
         return self.access.role_for(upn=ident) if "@" in ident else self.access.role_for(windows=ident)
 
     def _account_allowed(self, rec) -> bool:
-        """Managers can always sign in; everyone else needs an email domain that is still allowed."""
+        """Administrators can always sign in; everyone else needs an email domain that is still allowed."""
         return bool(rec.get("admin")) or self.domains.allows(rec.get("email", ""))
 
     def _lookup(self, s):
-        """(role, is_manager) for a live session, or (None, False) if the person's access has ended."""
+        """(role, is_admin) for a live session, or (None, False) if the person's access has ended."""
         src = s.get("src")
         if src == "account":
             rec = self.accounts.get(s["user"]) if self.accounts else None
@@ -417,13 +456,13 @@ class AuthGate:
         sid, s = self._session(h)
         if not s:
             return None
-        role, manager = self._lookup(s)
+        role, admin = self._lookup(s)
         if role is None:
             with self.lock:
                 self.sessions.pop(sid, None)
             self.audit("access_revoked", user=s["user"])
             return None
-        s["role"], s["admin"] = role, manager
+        s["role"], s["admin"] = role, admin
         return s
 
     def _new_session(self, a: dict) -> str:
@@ -464,7 +503,7 @@ class AuthGate:
         return s
 
     def _need_manager(self, h):
-        """Session of a signed-in manager (accounts mode), else the response is sent and None returned."""
+        """Session of a signed-in project administrator (accounts mode), else the response is sent, None returned."""
         s = self.current_user(h)
         if not s:
             self._send(h, 401, {"error": "sign_in_required"})
@@ -482,7 +521,7 @@ class AuthGate:
 
     # ---- /auth/* routes
     def handle(self, h) -> bool:
-        """Serve /auth/* (sign-in page, sign-in calls, access requests, manager page). True if handled here."""
+        """Serve /auth/* (sign-in page, invitation claim, sign-in calls, access requests, administrator page)."""
         parts = urlsplit(h.path)
         p, m = parts.path, h.command
         if not p.startswith("/auth/"):
@@ -492,6 +531,20 @@ class AuthGate:
             return True
         if p == "/auth/admin" and m == "GET":
             self._admin_page(h)
+            return True
+        # The invitation claim is protected by the invitation code and an e-mailed code, not by the console token,
+        # so a person who is not at the console's own screen can set up their project.
+        if p == "/auth/claim" and m == "GET":
+            self._claim_page(h)
+            return True
+        if p == "/auth/claim/start" and m == "POST":
+            self._claim_start(h)
+            return True
+        if p == "/auth/claim/verify" and m == "POST":
+            self._claim_verify(h)
+            return True
+        if p == "/auth/claim/resend" and m == "POST":
+            self._register_resend(h, claim=True)
             return True
         if not self._token_ok(h):
             self._send(h, 401, {"error": "console_token_required"})
@@ -532,6 +585,8 @@ class AuthGate:
         out = {"user": s["user"], "name": s.get("name", ""), "role": s["role"], "mode": self.cfg.mode,
                "admin": bool(s.get("admin")),
                "idle_expires_in_s": int(self.cfg.idle_s - (self.clock() - s["last_seen"]))}
+        if self.trust and self.trust.project():
+            out["project"] = self.trust.project()["name"]
         if s.get("admin") and self.accounts:
             out["pending"] = len(self.accounts.pending())
         self._send(h, 200, out)
@@ -624,10 +679,10 @@ class AuthGate:
 
     # ---- accounts mode: sign in
     _LOGIN_FAIL = {"bad": (401, "Invalid username or password."),
-                   "pending": (403, "Your access request is waiting for manager approval."),
+                   "pending": (403, "Your access request is waiting for approval by a project administrator."),
                    "rejected": (403, "Your access request was not approved."),
-                   "disabled": (403, "This account is disabled. Contact a console manager."),
-                   "domain": (403, "Your email domain is no longer allowed on this console. Contact a console manager.")}
+                   "disabled": (403, "This account is disabled. Contact a project administrator."),
+                   "domain": (403, "Your email domain is no longer allowed on this console. Contact a project administrator.")}
 
     def _login_account(self, h):
         b = self._json(h)
@@ -656,7 +711,8 @@ class AuthGate:
     # ---- accounts mode: request access (details -> emailed code -> pending request)
     _REG_STATUS = {"username_taken": 409, "email_taken": 409, "domain_not_allowed": 403, "rate_limited": 429,
                    "too_many": 429, "too_soon": 429, "too_many_codes": 429, "too_many_attempts": 429,
-                   "expired": 410, "not_found": 410, "email_failed": 502, "registration_closed": 403}
+                   "expired": 410, "not_found": 410, "email_failed": 502, "registration_closed": 403,
+                   "platform_controlled": 403, "claim_locked": 429, "invitation_closed": 410}
 
     def _reg_error(self, h, e: accts.AccountError, **extra):
         body = {"error": e.code, "message": e.message}
@@ -671,7 +727,7 @@ class AuthGate:
 
     def _check_domain(self, email: str):
         if not self.domains.list():
-            raise accts.AccountError("registration_closed", "Access requests are not open. Contact a console manager.")
+            raise accts.AccountError("registration_closed", "Access requests are not open. Contact a project administrator.")
         if not self.domains.allows(email):
             raise accts.AccountError("domain_not_allowed",
                                      "Use your work email address. This email domain cannot request access.")
@@ -690,7 +746,7 @@ class AuthGate:
         except Exception as exc:  # noqa: BLE001
             self.audit("verification_failed", user=details["username"], reason=f"send: {type(exc).__name__}")
             raise accts.AccountError("email_failed", "The verification email could not be sent. Try again in a few "
-                                                     "minutes, or contact a console manager.")
+                                                     "minutes, or contact a project administrator.")
 
     def _verify_payload(self, vid, email, rec):
         now = self.clock()
@@ -726,8 +782,11 @@ class AuthGate:
         self.audit("verification_sent", user=username, email=email)
         self._send(h, 202, self._verify_payload(vid, email, rec))
 
-    def _register_resend(self, h):
-        if not self._registration_open(h):
+    def _register_resend(self, h, claim=False):
+        if claim:
+            if not self._claim_enabled(h):
+                return
+        elif not self._registration_open(h):
             return
         b = self._json(h)
         vid = str(b.get("id", ""))
@@ -752,6 +811,9 @@ class AuthGate:
             self.audit("verification_failed", reason=e.code)
             self._reg_error(h, e)
             return
+        if d.get("claim"):                              # a code issued for an invitation cannot create an ordinary request
+            self._send(h, 400, {"error": "invalid_code", "message": "That code belongs to a different step."})
+            return
         try:
             self._check_domain(d["email"])               # the domain may have been removed while the code was out
             rec = self.accounts.register(d["username"], d["name"], d["email"], reason=d["reason"], pw_hash=d["pw"])
@@ -762,12 +824,112 @@ class AuthGate:
         self.audit("registration_requested", user=rec["username"], email=rec["email"])
         self.notifier.request_submitted(rec)
         self._send(h, 201, {"state": "pending",
-                            "message": "Your request has been sent. A manager will review it; you can sign in once "
-                                       "it is approved."})
+                            "message": "Your request has been sent. A project administrator will review it; you can "
+                                       "sign in once it is approved."})
 
-    # ---- manager API (accounts mode)
+    # ---- platform mode: claiming the first-administrator invitation
+    def _has_admin(self) -> bool:
+        return bool(self.accounts and self.accounts.active_admins())
+
+    def _claim_invite(self):
+        """The invitation a person could claim right now, or None."""
+        if not (self.trust and self.cfg.mode == "accounts"):
+            return None
+        return self.trust.claimable_invite(self._has_admin())
+
+    def _claim_enabled(self, h) -> bool:
+        if self.cfg.mode != "accounts" or not self.trust:
+            self._send(h, 404, {"error": "not_found"})
+            return False
+        return True
+
+    def _claim_blocked(self) -> bool:
+        now = self.clock()
+        self._claim_fails = [t for t in self._claim_fails if now - t < 900]
+        return len(self._claim_fails) >= 10
+
+    def _claim_page(self, h):
+        if not self._claim_enabled(h):
+            return
+        import claim_page
+        inv, proj = self._claim_invite(), self.trust.project()
+        hint = f"You were invited to set up this console for {proj['name']}." if (inv and proj) else ""
+        page, csp = claim_page.render(project_name=proj["name"] if proj else "", is_open=bool(inv),
+                                      admin_hint=hint, min_password=self.cfg.min_password)
+        self._send(h, 200, page, ctype="text/html", headers=[("Content-Security-Policy", csp)])
+
+    def _claim_start(self, h):
+        if not self._claim_enabled(h):
+            return
+        b = self._json(h)
+        if self._claim_blocked():
+            self._send(h, 429, {"error": "claim_locked",
+                                "message": "Too many wrong invitation codes. Try again in 15 minutes."})
+            return
+        inv = self._claim_invite()
+        if not inv or not self.trust.token_matches(inv, str(b.get("token", ""))):
+            self._claim_fails.append(self.clock())
+            self.audit("claim_refused", reason="invalid_invitation")
+            self._send(h, 400, {"error": "invalid_invitation",
+                                "message": "That invitation code is not valid, or it has expired. Check it, or ask the "
+                                           "platform team for a new one."})
+            return
+        try:
+            username, name, email = self.accounts.validate_request(b.get("username"), b.get("name"), inv["admin_email"],
+                                                                   str(b.get("password", "")))
+            details = {"username": username, "name": name, "email": email,
+                       "pw": accts.hash_password(str(b.get("password", ""))), "reason": "invitation",
+                       "claim": inv["invite_hash"]}
+            vid, code, rec = self.verifications.start(details)
+            try:
+                self._deliver_code(details, code)
+            except accts.AccountError:
+                self.verifications.cancel(vid)
+                raise
+        except accts.AccountError as e:
+            self.audit("claim_refused", reason=e.code)
+            self._reg_error(h, e)
+            return
+        self.audit("claim_code_sent", user=username, project=inv["project_id"])
+        self._send(h, 202, self._verify_payload(vid, email, rec))
+
+    def _claim_verify(self, h):
+        if not self._claim_enabled(h):
+            return
+        b = self._json(h)
+        try:
+            d = self.verifications.check(str(b.get("id", "")), str(b.get("code", "")))
+        except accts.AccountError as e:
+            self.audit("claim_verification_failed", reason=e.code)
+            self._reg_error(h, e)
+            return
+        if not d.get("claim"):
+            self._send(h, 400, {"error": "invalid_code", "message": "That code belongs to a different step."})
+            return
+        with self.claim_lock:
+            inv = self._claim_invite()
+            if not inv or inv["invite_hash"] != d["claim"]:
+                self.audit("claim_refused", reason="invitation_closed")
+                self._send(h, 410, {"error": "invitation_closed",
+                                    "message": "This invitation is no longer open. Ask the platform team for a new one."})
+                return
+            try:
+                rec = self.accounts.create_admin_with_hash(d["username"], d["name"], d["email"], d["pw"])
+                self.trust.consume(inv["invite_hash"], by=rec["username"])
+            except (accts.AccountError, pt.TrustError) as e:
+                self._reg_error(h, accts.AccountError(getattr(e, "code", "bad_request"), getattr(e, "message", str(e))))
+                return
+        self.audit("project_claimed", user=rec["username"], project=inv["project_id"], purpose=inv["purpose"],
+                   serial=inv["serial"])
+        self._send(h, 201, {"state": "ready", "message": "Your console is ready. Sign in with your username and password."})
+
+    # ---- administrator API (accounts mode)
     def _domain_rows(self):
-        return [{"domain": d, "active_users": self.accounts.count_active_in_domain(d)} for d in self.domains.list()]
+        return self.domains.rows(self.accounts.count_active_in_domain)
+
+    def _domain_payload(self):
+        return {"control": self.domain_control, "project": self.trust.project() if self.trust else None,
+                "domains": self._domain_rows()}
 
     def _admin_api(self, h, p, m):
         if p == "/auth/admin/requests" and m == "GET":
@@ -778,12 +940,13 @@ class AuthGate:
                 self._send(h, 200, {"users": [u for u in self.accounts.list_users() if u["status"] != "pending"]})
         elif p == "/auth/admin/domains" and m == "GET":
             if self._need_manager(h):
-                self._send(h, 200, {"domains": self._domain_rows()})
+                self._send(h, 200, self._domain_payload())
         elif p == "/auth/admin/domains" and m == "POST":
             s = self._need_manager(h)
             if s:
                 b = self._json(h)
                 action, value = str(b.get("action", "")), str(b.get("domain", ""))
+                platform = self.domain_control == "platform"
                 try:
                     if action == "add":
                         d = self.domains.add(value)
@@ -793,13 +956,36 @@ class AuthGate:
                         affected = self.accounts.count_active_in_domain(d)
                         if not self.domains.remove(d):
                             raise accts.AccountError("not_found", "That domain is not on the list.")
-                        self.audit("domain_removed", domain=d, by=s["user"], affected_users=affected)
+                        self.audit("domain_paused" if platform else "domain_removed", domain=d, by=s["user"],
+                                   affected_users=affected)
+                    elif action == "restore":
+                        d = value.strip().lower().lstrip("@")
+                        if not self.domains.restore(d):
+                            raise accts.AccountError("not_found", "That domain is not paused.")
+                        self.audit("domain_resumed", domain=d, by=s["user"])
                     else:
-                        raise accts.AccountError("bad_action", "Action must be add or remove.")
+                        raise accts.AccountError("bad_action", "Action must be add, remove or restore.")
                 except accts.AccountError as e:
+                    self._send(h, 403 if e.code == "platform_controlled" else 400, {"error": e.code, "message": e.message})
+                    return
+                self._send(h, 200, dict(self._domain_payload(), ok=True))
+        elif p == "/auth/admin/grants" and m == "POST":
+            s = self._need_manager(h)
+            if s:
+                b = self._json(h)
+                if not self.trust:
+                    self._send(h, 400, {"error": "not_platform_mode",
+                                        "message": "This console is not managed by the platform team."})
+                    return
+                try:
+                    summary = self.trust.apply(str(b.get("grant", "")))
+                except pt.TrustError as e:
+                    self.audit("grant_refused", by=s["user"], reason=e.code)
                     self._send(h, 400, {"error": e.code, "message": e.message})
                     return
-                self._send(h, 200, {"ok": True, "domains": self._domain_rows()})
+                self.audit("grant_applied", by=s["user"], kind=summary["kind"], serial=summary["serial"],
+                           already=summary["already"])
+                self._send(h, 200, dict(self._domain_payload(), ok=True, summary=summary))
         elif p == "/auth/admin/decide" and m == "POST":
             s = self._need_manager(h)
             if s:
@@ -809,7 +995,8 @@ class AuthGate:
                     target = self.accounts.get(str(b.get("username", "")))
                     if decision == "approve" and target and not self.domains.allows(target.get("email", "")):
                         raise accts.AccountError("domain_not_allowed", "This person's email domain is not on the allowed "
-                                                                       "list. Add the domain first, or reject the request.")
+                                                                       "list. Ask for the domain to be added, or reject "
+                                                                       "the request.")
                     rec = self.accounts.decide(b.get("username", ""), decision, by=s["user"], role=b.get("role"))
                 except accts.AccountError as e:
                     self._send(h, 409 if e.code in ("not_pending", "domain_not_allowed") else 400,
@@ -844,7 +1031,7 @@ class AuthGate:
             self._send(h, 302, headers=[("Location", "/auth/signin?next=" + quote("/auth/admin", safe=""))])
             return
         if not s.get("admin"):
-            self._send(h, 403, "Only a manager can open this page.", ctype="text/plain")
+            self._send(h, 403, "Only a project administrator can open this page.", ctype="text/plain")
             return
         nonce = secrets.token_urlsafe(16)
         csp = (f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
@@ -854,7 +1041,11 @@ class AuthGate:
 
     # ---- sign-in page
     def _signin_page(self, h, nxt):
-        """The page itself lives in signin_page.py (it also builds the matching Content-Security-Policy)."""
+        """The page itself lives in signin_page.py (it also builds the matching Content-Security-Policy).
+        A platform-mode console that has no administrator yet sends the visitor to the invitation claim page."""
+        if self._claim_invite() and not self._has_admin():
+            self._send(h, 302, headers=[("Location", "/auth/claim")])
+            return
         import signin_page
         page, csp = signin_page.render(self.cfg.mode, nxt, registration=self.cfg.allow_registration,
                                        min_password=self.cfg.min_password, code_minutes=self.cfg.verify_minutes)
@@ -898,25 +1089,41 @@ def startup_check(agent_dir):
         store = accts.AccountStore(cfg.accounts_file)
         if store.error:
             raise RuntimeError(f"Sign-in: {store.error}")
+        trust = pt.InstanceTrust(cfg.data_dir, cfg.platform_key) if cfg.platform_key else None
+        waiting_for_claim = False
         if not store.active_admins():
-            raise RuntimeError(f"Sign-in: {cfg.accounts_file} has no active manager. Create the first one with: "
-                               "python console_auth.py bootstrap-admin --user <name> --email <address>")
-        dom = accts.DomainPolicy(cfg.domains_file)
+            if trust is None:
+                raise RuntimeError(f"Sign-in: {cfg.accounts_file} has no active project administrator. Create the first "
+                                   "one with: python console_auth.py bootstrap-admin --user <name> --email <address>")
+            status, why = trust.invite_status(False)
+            if status != "open":
+                raise RuntimeError(f"Sign-in: this console has no project administrator and no open invitation ({why}). "
+                                   "Ask the platform team for a project grant, then run: "
+                                   "python console_auth.py grant apply <file>")
+            waiting_for_claim = True
+        if trust is not None:
+            if trust.error:
+                raise RuntimeError(f"Sign-in: {trust.error}. Ask the platform team for a fresh grant file.")
+            dom = pt.PlatformDomains(trust, cfg.data_dir / "domain-pauses.json")
+        else:
+            dom = accts.DomainPolicy(cfg.domains_file)
         if dom.error:
             raise RuntimeError(f"Sign-in: {dom.error}")
-        if not dom.list():
-            raise RuntimeError("Sign-in: no email domains are allowed yet, so only managers could sign in. Add one: "
-                               "python console_auth.py domains add <your-domain>   (for example deloitte.ca)")
-        if cfg.allow_registration and cfg.verify_delivery == "email":
+        if not dom.list() and not waiting_for_claim:
+            raise RuntimeError("Sign-in: no email domains are allowed, so only project administrators could sign in. " +
+                               ("Ask the platform team for a domain update (or resume a paused domain)."
+                                if trust is not None else
+                                "Add one: python console_auth.py domains add <your-domain>   (for example deloitte.ca)"))
+        if (cfg.allow_registration or waiting_for_claim) and cfg.verify_delivery == "email":
             if not accts.Notifier(None, cfg.env).enabled:
-                raise RuntimeError("Sign-in: access requests send a verification code by email, but email is not set "
+                raise RuntimeError("Sign-in: verification codes are sent by email, but email is not set "
                                    "up. Set CONSOLE_SMTP_HOST and CONSOLE_SMTP_FROM (see SMTP settings), or for local "
                                    "testing CONSOLE_VERIFY_DELIVERY=log, or turn requests off with "
                                    "CONSOLE_ALLOW_REGISTRATION=false")
         return cfg
     if cfg.mode == "windows" and os.name != "nt":
         raise RuntimeError("Sign-in: CONSOLE_AUTH_MODE=windows only works on Windows. Use CONSOLE_AUTH_MODE=accounts "
-                           "(username and password with manager approval) for Docker or a server.")
+                           "(username and password with administrator approval) for Docker or a server.")
     if cfg.mode == "entra" and importlib.util.find_spec("msal") is None:
         raise RuntimeError("Sign-in: the 'msal' package is missing. Run: pip install msal")
     al = AccessList(cfg.access_file)
@@ -952,7 +1159,7 @@ try{
   function paint(){
     var c=document.getElementById('auChip'),t=document.getElementById('auT');if(!c)return;
     r=AU.me?RANK[AU.me.role]:-1;
-    if(AU.me){c.className='chip ok';setText(t,(AU.me.name||AU.me.user)+' \u00b7 '+AU.me.role+(AU.me.admin?' \u00b7 manager':''));c.title='Signed in as '+AU.me.user;out.hidden=false;
+    if(AU.me){c.className='chip ok';setText(t,(AU.me.name||AU.me.user)+' \u00b7 '+AU.me.role+(AU.me.admin?' \u00b7 administrator':''));c.title='Signed in as '+AU.me.user+(AU.me.project?' \u00b7 '+AU.me.project:'');out.hidden=false;
       adm.hidden=!AU.me.admin;if(AU.me.admin){var n=AU.me.pending||0;setText(adm,'Access requests'+(n?' ('+n+')':''));adm.className=n?'btn ok-btn':'btn'}}
     else if(AU.lost){c.className='chip bad';setText(t,'Not signed in');out.hidden=true;adm.hidden=true}
     ['bStart','bStop','bPre','bDash'].forEach(function(id){lock(document.getElementById(id),1,'Needs the operator role')});
@@ -1006,38 +1213,46 @@ def inject_ui(page: bytes) -> bytes:
 ADMIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Access management - AI Delivery Console</title>
 <style nonce="__NONCE__">
+[hidden]{display:none!important}
 body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,Calibri,Arial,sans-serif;background:#f3f3f3;color:#1b1b1b;font-size:14px}
 header{background:#111;color:#fff;padding:0 28px;height:52px;display:flex;gap:14px;align-items:center}
 header .mk{width:24px;height:24px;border-radius:5px;background:#86BC25;display:grid;place-items:center}
 header .mk svg{width:15px;height:15px}
-header b{font-size:14px;font-weight:600} header span.sep{color:#666} header a{color:#ddd;font-size:13px;margin-left:auto;text-decoration:none}
+header b{font-size:14px;font-weight:600} header span.sep{color:#666} header .proj{color:#bbb}
+header a{color:#ddd;font-size:13px;margin-left:auto;text-decoration:none}
 header a:hover{color:#fff;text-decoration:underline}
 main{max-width:1040px;margin:28px auto;padding:0 24px}
 h1{font-size:22px;font-weight:600;margin:0 0 4px} .lead{margin:0 0 22px;color:#5c5c5c}
 section{background:#fff;border:1px solid #e1e1e1;border-radius:6px;margin:0 0 20px}
 section h2{font-size:15px;font-weight:600;margin:0;padding:14px 18px;border-bottom:1px solid #ededed}
+section h3{font-size:13px;font-weight:600;margin:0 0 6px}
 section .hint{margin:0;padding:10px 18px 0;color:#5c5c5c;font-size:13px}
 table{width:100%;border-collapse:collapse}
 th,td{padding:10px 18px;text-align:left;font-size:13px;border-bottom:1px solid #f0f0f0;vertical-align:top} th{color:#5c5c5c;font-size:12px;font-weight:600}
 tr:last-child td{border-bottom:0}
-button,select,input{font:inherit;font-size:13px;padding:6px 10px;border-radius:4px;border:1px solid #c8c8c8;background:#fff;cursor:pointer}
+button,select,input,textarea{font:inherit;font-size:13px;padding:6px 10px;border-radius:4px;border:1px solid #c8c8c8;background:#fff;cursor:pointer}
 #nd{cursor:text;min-width:240px}
+textarea{cursor:text;width:100%;box-sizing:border-box;min-height:90px;font-family:Consolas,"Cascadia Mono",monospace;font-size:12px}
 input[type=checkbox]{width:16px;height:16px;vertical-align:-3px;margin:0 6px 0 0;cursor:pointer}
 button.ok{background:#111;border-color:#111;color:#fff;font-weight:600} button.ok:hover{background:#333}
 button.no{color:#a4262c;border-color:#d4a5a8} button.no:hover{background:#fdf3f4}
-button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid #86BC25;outline-offset:1px}
+button:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid #86BC25;outline-offset:1px}
 .addrow{display:flex;gap:8px;padding:14px 18px;border-top:1px solid #f0f0f0}
+.upd{padding:14px 18px;border-top:1px solid #f0f0f0}.upd p{margin:0 0 8px;color:#5c5c5c;font-size:13px}.upd button{margin-top:8px}
 #msg{margin:0 0 16px;font-size:13px;min-height:18px} #msg.err{color:#a4262c} #msg.ok{color:#2d6a0f} .mut{color:#5c5c5c}
 p.empty{margin:0;padding:14px 18px;color:#5c5c5c}
-</style></head><body><header><span class="mk"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 21 13 16l-5-5M17 22h7" fill="none" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><b>AI Delivery Console</b><span class="sep">/</span><span>Access management</span><a id="back" href="/">Back to the console</a></header>
-<main><h1>Access management</h1><p class="lead">Review access requests, manage people and choose which email domains may request access.</p>
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;background:#e6f2d9;color:#2d6a0f}.pill.p{background:#fff4ce;color:#5c4400}
+</style></head><body><header><span class="mk"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 21 13 16l-5-5M17 22h7" fill="none" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><b>AI Delivery Console</b><span class="sep">/</span><span>Access management</span><span class="proj" id="proj"></span><a id="back" href="/">Back to the console</a></header>
+<main><h1>Access management</h1><p class="lead">Review access requests, manage people and the allowed email domains for this project.</p>
 <div id="msg" role="status" aria-live="polite"></div>
 <section><h2>Access requests</h2><div id="req"></div></section>
 <section><h2>People</h2><div id="usr"></div></section>
 <section><h2>Allowed email domains</h2>
-<p class="hint">Only email addresses on these domains can request access or sign in. Managers can always sign in. Use *.example.com to allow every sub-domain.</p>
+<p class="hint" id="domHint"></p>
 <div id="dom"></div>
-<form class="addrow" id="fDom" autocomplete="off"><label class="mut" for="nd" hidden>Domain</label><input id="nd" placeholder="example.com" maxlength="253" spellcheck="false"><button class="ok" type="submit">Add domain</button></form>
+<form class="addrow" id="fDom" autocomplete="off" hidden><label for="nd" hidden>Domain</label><input id="nd" placeholder="example.com" maxlength="253" spellcheck="false"><button class="ok" type="submit">Add domain</button></form>
+<div class="upd" id="upd" hidden><h3>Update from the platform team</h3><p>Only the platform team can add a domain. Paste the update file they sent you (it is signed, so it cannot be changed or made up).</p>
+<textarea id="grant" spellcheck="false" aria-label="Platform update file"></textarea><button class="ok" id="applyGrant" type="button">Apply update</button></div>
 </section></main>
 <script nonce="__NONCE__">
 const TOKEN=new URLSearchParams(location.hash.slice(1)).get('t')||sessionStorage.getItem('rcTok')||'';
@@ -1059,14 +1274,21 @@ async function decide(u,decision,role){
   try{await call('/auth/admin/decide','POST',{username:u,decision,role});say((decision==='approve'?'Approved ':'Rejected ')+u+'.','ok');load();}catch(e){if(e.message!=='auth')say(e.message,'err');}}
 async function change(u,patch){
   try{await call('/auth/admin/user','POST',Object.assign({username:u},patch));say('Saved '+u+'.','ok');load();}catch(e){if(e.message!=='auth')say(e.message,'err');load();}}
+let CONTROL='local';
 async function domain(action,d,affected){
-  if(action==='remove'&&affected>0&&!confirm(affected+' active user'+(affected===1?'':'s')+' on '+d+' will lose access at once. Remove '+d+'?'))return;
-  try{await call('/auth/admin/domains','POST',{action,domain:d});say((action==='add'?'Added ':'Removed ')+d+'.','ok');if(action==='add')$('nd').value='';load();}catch(e){if(e.message!=='auth')say(e.message,'err');}}
+  const word=CONTROL==='platform'?'pause':'remove';
+  if(action==='remove'&&affected>0&&!confirm(affected+' active user'+(affected===1?'':'s')+' on '+d+' will lose access at once. '+(word==='pause'?'Pause':'Remove')+' '+d+'?'))return;
+  try{await call('/auth/admin/domains','POST',{action,domain:d});say((action==='add'?'Added ':action==='restore'?'Resumed ':(word==='pause'?'Paused ':'Removed '))+d+'.','ok');if(action==='add')$('nd').value='';load();}catch(e){if(e.message!=='auth')say(e.message,'err');}}
 $('fDom').addEventListener('submit',e=>{e.preventDefault();const v=$('nd').value.trim();if(v)domain('add',v,0);});
+$('applyGrant').addEventListener('click',async()=>{
+  const g=$('grant').value.trim();if(!g){say('Paste the update file first.','err');return;}
+  try{const j=await call('/auth/admin/grants','POST',{grant:g});say(j.summary.already?'That update was already applied.':'Update applied (serial '+j.summary.serial+').','ok');$('grant').value='';load();}
+  catch(e){if(e.message!=='auth')say(e.message,'err');}});
 async function load(){
   if(!TOKEN){say('Open this page from the console (the Access requests button).','err');return;}
   try{
     const [a,b,c]=await Promise.all([call('/auth/admin/requests','GET'),call('/auth/admin/users','GET'),call('/auth/admin/domains','GET')]);
+    CONTROL=c.control;$('proj').textContent=c.project?' \u00b7 '+c.project.name:'';
     const rows=a.requests.map(r=>{const tr=el('tr'),sel=roleSelect('viewer');
       const who=el('td');who.appendChild(el('b',r.name));who.appendChild(el('div',r.email,'mut'));who.appendChild(el('div','username: '+r.username,'mut'));
       tr.appendChild(who);tr.appendChild(el('td',r.reason||'(no reason given)'));tr.appendChild(el('td',new Date((r.requested||0)*1000).toLocaleString()));
@@ -1078,14 +1300,22 @@ async function load(){
       const who=el('td');who.appendChild(el('b',u.name));who.appendChild(el('div',u.email,'mut'));tr.appendChild(who);
       tr.appendChild(el('td',u.username));
       const rc=el('td');rc.appendChild(sel);sel.addEventListener('change',()=>change(u.username,{role:sel.value}));tr.appendChild(rc);
-      const mc=el('td'),cb=el('input');cb.type='checkbox';cb.checked=!!u.admin;cb.addEventListener('change',()=>change(u.username,{admin:cb.checked}));mc.appendChild(cb);mc.appendChild(document.createTextNode(' can manage access'));tr.appendChild(mc);
+      const mc=el('td'),cb=el('input');cb.type='checkbox';cb.checked=!!u.admin;cb.addEventListener('change',()=>change(u.username,{admin:cb.checked}));mc.appendChild(cb);mc.appendChild(document.createTextNode(' project administrator'));tr.appendChild(mc);
       const sc=el('td'),dis=u.status==='disabled',bt=el('button',dis?'Enable':'Disable',dis?'ok':'no');bt.addEventListener('click',()=>change(u.username,{disabled:!dis}));
       sc.appendChild(el('span',dis?'disabled  ':'active  ','mut'));sc.appendChild(bt);tr.appendChild(sc);return tr;});
-    $('usr').replaceChildren(table(['Person','Username','Role','Manager','Status'],urows,'Nobody yet.'));
+    $('usr').replaceChildren(table(['Person','Username','Role','Administrator','Status'],urows,'Nobody yet.'));
+    const plat=c.control==='platform';
+    $('domHint').textContent=plat?'These domains were approved by the platform team. You can pause a domain, which stops everyone on it from signing in, and resume it later. Only the platform team can add a domain. Administrators can always sign in.'
+      :'Only email addresses on these domains can request access or sign in. Administrators can always sign in. Use *.example.com to allow every sub-domain.';
+    $('fDom').hidden=plat;$('upd').hidden=!plat;
     const drows=c.domains.map(d=>{const tr=el('tr');tr.appendChild(el('td',d.domain));
       tr.appendChild(el('td',d.active_users+' active user'+(d.active_users===1?'':'s'),'mut'));
-      const ac=el('td'),bt=el('button','Remove','no');bt.addEventListener('click',()=>domain('remove',d.domain,d.active_users));ac.appendChild(bt);tr.appendChild(ac);return tr;});
-    $('dom').replaceChildren(table(['Domain','People','' ],drows,'No domains are allowed. Nobody can request access, and only managers can sign in.'));
+      const stc=el('td');if(plat){stc.appendChild(el('span',d.state==='paused'?'Paused':'Allowed','pill'+(d.state==='paused'?' p':'')));}tr.appendChild(stc);
+      const ac=el('td');let bt;
+      if(plat&&d.state==='paused'){bt=el('button','Resume','ok');bt.addEventListener('click',()=>domain('restore',d.domain,d.active_users));}
+      else{bt=el('button',plat?'Pause':'Remove','no');bt.addEventListener('click',()=>domain('remove',d.domain,d.active_users));}
+      ac.appendChild(bt);tr.appendChild(ac);return tr;});
+    $('dom').replaceChildren(table(['Domain','People','',''],drows,plat?'The platform team has not approved any domain yet.':'No domains are allowed. Nobody can request access, and only administrators can sign in.'));
   }catch(e){if(e.message!=='auth')say(e.message,'err');}}
 $('back').addEventListener('click',e=>{e.preventDefault();location.href='/';});
 load();setInterval(load,30000);
@@ -1099,6 +1329,18 @@ def _prompt_password(label="Password") -> str:
     if a != b:
         raise accts.AccountError("mismatch", "The two passwords do not match.")
     return a
+
+
+def _cli_env() -> dict:
+    """Settings for command-line use: the real environment, then non-secret values from the repository's .env."""
+    env = dict(os.environ)
+    try:
+        import secret_store
+        for k, v in secret_store.read_env_file(Path(__file__).resolve().parent.parent / ".env").items():
+            env.setdefault(k, v)
+    except Exception:  # noqa: BLE001
+        pass
+    return env
 
 
 def _cli(argv) -> int:
@@ -1117,17 +1359,22 @@ def _cli(argv) -> int:
     p.add_argument("--windows", default="")
     sub.add_parser("list")
     sub.add_parser("check")
+    sub.add_parser("project")
+    p = sub.add_parser("grant")
+    p.add_argument("action", choices=("apply", "show"))
+    p.add_argument("file", nargs="?", default="")
     p = sub.add_parser("windows-test")
     p.add_argument("--method", choices=("auto", "hello", "password"), default=None)
     p = sub.add_parser("domains")
-    p.add_argument("action", nargs="?", choices=("list", "add", "remove"), default="list")
+    p.add_argument("action", nargs="?", choices=("list", "add", "remove", "restore"), default="list")
     p.add_argument("domain", nargs="?", default="")
     p = sub.add_parser("bootstrap-admin")
     p.add_argument("--user", required=True)
     p.add_argument("--name", default="")
     p.add_argument("--email", required=True)
-    p = sub.add_parser("make-manager")
-    p.add_argument("--user", required=True)
+    for alias in ("make-admin", "make-manager"):
+        p = sub.add_parser(alias)
+        p.add_argument("--user", required=True)
     sub.add_parser("accounts")
     sub.add_parser("requests")
     for name in ("approve", "reject", "disable", "enable", "reset-password"):
@@ -1137,14 +1384,20 @@ def _cli(argv) -> int:
             p.add_argument("--role", choices=ROLES, default="viewer")
     a = ap.parse_args(argv)
     path = default_access_file()
-    cfg_env = dict(os.environ)
+    cfg_env = _cli_env()
 
     def store():
         return accts.AccountStore(data_dir(cfg_env) / "accounts.json",
                                   min_len=_env_int(cfg_env, "CONSOLE_MIN_PASSWORD_LENGTH", 12))
 
+    def trust():
+        key = (cfg_env.get("CONSOLE_PLATFORM_PUBLIC_KEY") or "").strip()
+        return pt.InstanceTrust(data_dir(cfg_env), key) if key else None
+
     def domains():
-        return accts.DomainPolicy(data_dir(cfg_env) / "domains.json")
+        t = trust()
+        return pt.PlatformDomains(t, data_dir(cfg_env) / "domain-pauses.json") if t else \
+            accts.DomainPolicy(data_dir(cfg_env) / "domains.json")
 
     try:
         if a.cmd == "init":
@@ -1186,9 +1439,57 @@ def _cli(argv) -> int:
             print(f"[auth] {path}")
             for u in users:
                 print(f"  {u.get('role', '?'):<9} {u.get('upn', '-'):<34} {u.get('windows', '-')}")
-            return 0 if users else 1
+            return 0
+        if a.cmd == "project":
+            t = trust()
+            if t is None:
+                print("[auth] standalone console (no platform key): domains are managed locally. A project that the "
+                      "platform team onboarded sets CONSOLE_PLATFORM_PUBLIC_KEY in .env.")
+                return 0
+            st = t.state()
+            if st["error"]:
+                print(f"[auth] FAIL {st['error']}")
+                return 1
+            print("[auth] platform-managed console")
+            if st["project"]:
+                print(f"  project   : {st['project']['name']}  ({st['project']['id']})   grants applied up to serial {st['serial']}")
+            else:
+                print("  project   : none yet - apply the project grant: python console_auth.py grant apply <file>")
+            dp = domains()
+            print(f"  domains   : {', '.join(dp.list()) or '(none)'}"
+                  + (f"   paused: {', '.join(dp.paused())}" if dp.paused() else ""))
+            has_admin = bool(store().active_admins())
+            print(f"  admin     : {'active project administrator present' if has_admin else 'none yet'}")
+            print(f"  invitation: {t.invite_status(has_admin)[1]}")
+            return 0
+        if a.cmd == "grant":
+            t = trust()
+            if t is None:
+                print("[auth] FAIL set CONSOLE_PLATFORM_PUBLIC_KEY in .env first (the platform team gives you the key).")
+                return 1
+            if a.action == "show":
+                for g in t.state()["grants"]:
+                    extra = f"domains={','.join(g['domains'])}" if g["kind"] == "project-grant" else \
+                        f"add={','.join(g['add'])} remove={','.join(g['remove'])}"
+                    print(f"  serial {g['serial']:<3} {g['kind']:<14} {extra}")
+                return 0
+            if not a.file:
+                print("[auth] usage: grant apply FILE")
+                return 1
+            try:
+                summary = t.apply(Path(a.file).read_text(encoding="utf-8-sig"))
+            except OSError as exc:
+                print(f"[auth] FAIL cannot read {a.file}: {exc.strerror}")
+                return 1
+            except pt.TrustError as exc:
+                print(f"[auth] FAIL {exc.message}")
+                return 1
+            print(f"[auth] {'already applied' if summary['already'] else 'applied'}: {summary['kind']} serial "
+                  f"{summary['serial']} for {summary['project_id']}")
+            return 0
         if a.cmd == "domains":
             dp = domains()
+            platform = trust() is not None
             if a.action == "add":
                 if not a.domain:
                     print("[auth] usage: domains add deloitte.ca")
@@ -1200,16 +1501,28 @@ def _cli(argv) -> int:
                     return 1
                 n = store().count_active_in_domain(a.domain.strip().lower().lstrip("@"))
                 if dp.remove(a.domain):
-                    print(f"[auth] removed: {a.domain}" + (f"  ({n} active user(s) lose access now)" if n else ""))
+                    print(f"[auth] {'paused' if platform else 'removed'}: {a.domain}"
+                          + (f"  ({n} active user(s) lose access now)" if n else ""))
                 else:
-                    print(f"[auth] {a.domain} was not on the list")
+                    print(f"[auth] {a.domain} is not currently allowed")
+                    return 1
+            elif a.action == "restore":
+                if not a.domain:
+                    print("[auth] usage: domains restore gov.bc.ca")
+                    return 1
+                if dp.restore(a.domain):
+                    print(f"[auth] resumed: {a.domain}")
+                else:
+                    print(f"[auth] {a.domain} is not paused")
                     return 1
             items = dp.list()
-            print(f"[auth] {dp.path}")
+            print(f"[auth] {'domains approved by the platform team' if platform else dp.path}")
             for d in items:
                 print(f"  {d}")
+            if platform and dp.paused():
+                print("  paused: " + ", ".join(dp.paused()))
             if not items:
-                print("  (none: nobody can request access, and only managers can sign in)")
+                print("  (none: nobody can request access, and only project administrators can sign in)")
             return 0
         if a.cmd == "windows-test":
             import windows_login
@@ -1227,20 +1540,24 @@ def _cli(argv) -> int:
             print(f"[auth] access list: {'role ' + role if role else 'NOT listed - run: python console_auth.py add --windows \"' + ident + '\" --role approver'}")
             return 0 if role else 1
         if a.cmd == "bootstrap-admin":
+            if trust() is not None:
+                print("[auth] FAIL this console is managed by the platform team: the first project administrator "
+                      "claims an invitation at /auth/claim. Nobody sets another person's password.")
+                return 1
             rec = store().bootstrap_admin(a.user, a.name, a.email, _prompt_password())
-            print(f"[auth] created manager {rec['username']} (role approver, can manage access)")
+            print(f"[auth] created project administrator {rec['username']} (role approver, can manage access)")
             dp = domains()
             if not dp.list():
                 print(f"[auth] allowed email domain: {dp.add(accts.email_domain(rec['email']))}")
             print("[auth] add to .env:  CONSOLE_AUTH_MODE=accounts")
             return 0
-        if a.cmd == "make-manager":
-            rec = store().make_manager(a.user)
-            print(f"[auth] {rec['username']} is now an active manager (role approver)")
+        if a.cmd in ("make-admin", "make-manager"):
+            rec = store().make_admin(a.user)
+            print(f"[auth] {rec['username']} is now an active project administrator (role approver)")
             return 0
         if a.cmd == "accounts":
             for u in store().list_users():
-                print(f"  {u['status']:<9} {str(u.get('role')):<9} {'manager' if u.get('admin') else '       '} {u['username']:<20} {u['email']}")
+                print(f"  {u['status']:<9} {str(u.get('role')):<9} {'admin  ' if u.get('admin') else '       '} {u['username']:<20} {u['email']}")
             return 0
         if a.cmd == "requests":
             rows = store().pending()
@@ -1268,10 +1585,12 @@ def _cli(argv) -> int:
                 return 1
             extra = ""
             if cfg.mode == "accounts":
-                extra = f"  domains={','.join(accts.DomainPolicy(cfg.domains_file).list())}  codes={cfg.verify_delivery}"
+                dp = domains()
+                extra = (f"  domain control={'platform' if trust() else 'standalone'}  domains={','.join(dp.list())}"
+                         f"  codes={cfg.verify_delivery}")
             print(f"[auth] OK  mode={cfg.mode}{extra}  secrets loaded (values not shown)")
             return 0
-    except accts.AccountError as exc:
+    except (accts.AccountError, pt.TrustError) as exc:
         print(f"[auth] FAIL {exc.message}")
         return 1
     ap.print_help()
